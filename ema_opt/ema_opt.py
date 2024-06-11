@@ -10,6 +10,7 @@ class ClipEMAOptimizer():
         self._read_optimizer(opt)
         self.state = opt.state
         self.ema_vals:List[float] = [-1e5 for _ in self.param_groups]
+        self.grad_norms:List[float] = [-1e5 for _ in self.param_groups]
         self.ema_coef = ema_coef
 
     def _read_optimizer(self, opt:Optimizer):
@@ -47,4 +48,5 @@ class ClipEMAOptimizer():
             else:
                 ema_vals[idx] -= (1-self.ema_coef)*(shadow - grad_norm)
             clip_grad_norm_(pas, max_norm=2*ema_vals[idx])
+            self.grad_norms[idx] = grad_norm
         self.opt.step(closure)
