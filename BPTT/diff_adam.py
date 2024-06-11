@@ -2,7 +2,7 @@ from BPTT.diff_optim import DiffOptimizer
 from type_ import *
 import torch
 
-class Adam(DiffOptimizer):
+class DiffAdam(DiffOptimizer):
 
     def __init__(self,
                  model:Module, 
