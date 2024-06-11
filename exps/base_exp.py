@@ -252,7 +252,7 @@ class BaseExperiment():
                     emas = val.ema_vals
                     for grp_idx in enumerate(grad_norms):
                         metric['_'.join([key, 'gradnorm', grp_idx])] = grad_norms[grp_idx]
-                        metric['_'.join([key, 'ema', grp_idx])] = emas[grp_idx]
+                        metric['_'.join([key, 'ema_val', grp_idx])] = emas[grp_idx]
             log(metric, step=step)
         
         if step%10==0:
