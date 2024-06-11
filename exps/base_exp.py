@@ -233,13 +233,14 @@ class BaseExperiment():
         from wandb import log
         for opt in synset_opts.values():
             opt.zero_grad()
-        if bptt_type in ['bptt', 'tbptt']:
-            meta_loss_item = innerloop.loop(num_forward, 
-                                            num_backward,
-                                            synset.flat_trainables,
-                                            batch_kwargs,
-                                            meta_loss_kwargs
-                                            )
+        if bptt_type in ['ratbptt', 'rat_bptt']:
+            num_forward = np.random.randint(num_backward, num_forward)    
+        meta_loss_item = innerloop.loop(num_forward, 
+                                        num_backward,
+                                        synset.flat_trainables,
+                                        batch_kwargs,
+                                        meta_loss_kwargs
+                                        )
         for opt in synset_opts.values():
             opt.step()
         
