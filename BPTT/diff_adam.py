@@ -14,7 +14,7 @@ class DiffAdam(DiffOptimizer):
         self.dLdm_groups:List[Tensor] = None
 
     def update_backprop_state(self):
-        from torch import zeros_like, no_grad, cat
+        from torch import zeros_like, no_grad, cat, sqrt, tensor
         from numpy import power
         dLdw_groups = self.dLdw_groups
         if self.dLdv_groups is None:
@@ -37,12 +37,19 @@ class DiffAdam(DiffOptimizer):
         gts = [grads_[startend[0]:startend[1]] for startend in self._pa_groups_startend_lst]
         with no_grad():
             # for idx, group in enumerate(param_groups):
-            for dLdw, dLdm, dLdv, state, group, gt in zip(dLdw_groups, dLdm_groups, dLdv_groups, states, param_groups, gts):
+            for group_idx, group in enumerate(param_groups):
+                dLdw = dLdw_groups[group_idx]
+                dLdm = dLdm_groups[group_idx]
+                dLdv = dLdv_groups[group_idx]
+                state = states[group_idx]
+                group = param_groups[group_idx]
+                gt_ = gts[group_idx]
+            # for dLdw, dLdm, dLdv, state, group, gt in zip(dLdw_groups, dLdm_groups, dLdv_groups, states, param_groups, gts):
                 # gt = self.flatten([ele.grad.detach() for ele in group['params']]).detach()
-                gt = cat([ele.detach().flatten() for ele in gt])
+                gt = cat([ele.detach().flatten() for ele in gt_])
                 lr = group['lr']
-                beta1 = group['betas'][0]
-                beta2 = group['betas'][1]
+                beta1 = tensor(group['betas'][0])
+                beta2 = tensor(group['betas'][1])
                 eps = group['eps']
                 weight_decay = group['weight_decay']
                 maximize = group['maximize']
@@ -50,44 +57,48 @@ class DiffAdam(DiffOptimizer):
                 v = cat([dct['exp_avg_sq'].flatten() for dct in state])
                 # m[m==0] = 1e-10#如果回头还是爆炸，就把adam的step改一下，让它在第一个step处加一个正态offset
                 # v[v==0] = 1e-20
+                # m.add_(torch.randn_like(m).mul(1e-10))
+                # v.add_(torch.randn_like(v).mul(1e-20))
                 #m.add_(1e-8)# offset m and v by a very small amount, keep dLdv from exploding
                 #v.add_(1e-16)
-                t = state[0]['step'].item()
+                t = state[0]['step']
                 omb1 = 1.-beta1
-                omb1t = 1.- power(beta1, t)
+                omb1t = 1.- beta1.pow(t)
                 omb2 = 1.-beta2
-                omb2t = 1. - power(beta2, t)
+                omb2t = 1. - beta2.pow(t)
                 if maximize:
                     gt.mul_(-1.)
                 if weight_decay!=0:
                     w = torch.cat([ele.detach().flatten() for ele in group['params']])
                     gt.add_(w.mul(weight_decay))
-                sqrt_vdivomb2t = v.div_(omb2t).pow_(0.5)
+                # sqrt_vdivomb2t = v.div_(omb2t).pow_(0.5)
                 # print('max m', torch.max(torch.abs(m)).item())
                 # print('min m', torch.min(torch.abs(m)).item())
                 # print('max v', torch.max(torch.abs(v)).item())
                 # print('min v', torch.min(torch.abs(v)).item())
                 # print('max sqrtvdivomb2t', torch.max(torch.abs(sqrt_vdivomb2t)).item())
                 # print('min sqrtvdivomb2t', torch.min(torch.abs(sqrt_vdivomb2t)).item())
-                dLdm.mul_(beta1).sub_(dLdw.mul(lr/omb1t).div(sqrt_vdivomb2t.add(eps)))
-                dLdv.mul_(beta2)
-                # print('max dLdv before adding', torch.max(torch.abs(dLdv)).item())
-                dLdv_add = m.mul_(lr/omb1t/omb2t/2.0).mul_(dLdw)
-                # print('max additive before division', torch.max(torch.abs(dLdv_add)).item())
-                dLdv_add.div_(sqrt_vdivomb2t)
-                # print('max additive after first division', torch.max(torch.abs(dLdv_add)).item())
-                dLdv_add.div_(sqrt_vdivomb2t.add_(eps).pow_(2))# this is where dLdv explodes if v and m are not slighted offset.
-                # print('epsilon: ', eps)
-                # print('max second division:', torch.max(torch.abs(sqrt_vdivomb2t.add(eps).pow(2))).item())
-                # print('min second division:', torch.min(torch.abs(sqrt_vdivomb2t.add(eps).pow(2))).item())
-                # print('max additive after division', torch.max(torch.abs(dLdv_add)).item())
-                #dLdv.add_(dLdw.mul(m.mul(lr/omb1t/omb2t/2.0)).div(sqrt_vdivomb2t).div(sqrt_vdivomb2t.add(eps).pow(2)))
-                dLdv.add_(dLdv_add)
-                # print('max gt', torch.max(torch.abs(gt)).item())
-                # print('max dLdv', torch.max(torch.abs(dLdv)).item())
-                # print('max dLdm', torch.max(torch.abs(dLdm)).item())
-                # print('omb2', omb2)
-                # print('omb1', omb1)
+                # dLdm.mul_(beta1).sub_(dLdw.mul(lr/omb1t).div(sqrt_vdivomb2t.add(eps)))
+                # dLdv.mul_(beta2)
+                # # print('max dLdv before adding', torch.max(torch.abs(dLdv)).item())
+                # dLdv_add = m.mul_(lr/omb1t/omb2t/2.0).mul_(dLdw)
+                # # print('max additive before division', torch.max(torch.abs(dLdv_add)).item())
+                # dLdv_add.div_(sqrt_vdivomb2t)
+                # # print('max additive after first division', torch.max(torch.abs(dLdv_add)).item())
+                # dLdv_add.div_(sqrt_vdivomb2t.add_(eps).pow_(2))# this is where dLdv explodes if v and m are not slighted offset.
+                # # print('epsilon: ', eps)
+                # # print('max second division:', torch.max(torch.abs(sqrt_vdivomb2t.add(eps).pow(2))).item())
+                # # print('min second division:', torch.min(torch.abs(sqrt_vdivomb2t.add(eps).pow(2))).item())
+                # # print('max additive after division', torch.max(torch.abs(dLdv_add)).item())
+                # #dLdv.add_(dLdw.mul(m.mul(lr/omb1t/omb2t/2.0)).div(sqrt_vdivomb2t).div(sqrt_vdivomb2t.add(eps).pow(2)))
+                # dLdv.add_(dLdv_add)
+                # # print('max gt', torch.max(torch.abs(gt)).item())
+                # # print('max dLdv', torch.max(torch.abs(dLdv)).item())
+                # # print('max dLdm', torch.max(torch.abs(dLdm)).item())
+                # # print('omb2', omb2)
+                # # print('omb1', omb1)
+                dLdm.mul_(beta1).sub_(dLdw.mul(lr).div(omb1t).div(sqrt(v.div(omb2t)).add(eps)))
+                dLdv.mul_(beta2).add_(dLdw.mul(lr).mul(m).div(omb1t).div(omb2t).div(2).div(sqrt(v.div(omb2t))).div(sqrt(v.div(omb2t)).add(eps).pow(2)))
                 gt.mul_(2.*omb2).mul_(dLdv).add_(dLdm.mul(omb1))
                 if weight_decay!=0:
                     dLdw.add_(gt.mul(weight_decay))
@@ -97,3 +108,14 @@ class DiffAdam(DiffOptimizer):
                 # print('max dLdw', torch.max(torch.abs(dLdw)).item())
                 # print('max dLdgt', torch.max(torch.abs(gt)).item())
         return None
+    
+    def _post_step(self, taped):
+        if self.cur_idx==0:
+            #这一步是给初始的m和v加offset，不然v有些元素是0会爆炸。
+            for st_dt in self.optimizer.state.values():
+                m = st_dt['exp_avg']
+                v = st_dt['exp_avg_sq']
+                offset = torch.randn_like(m)*1e-10
+                m.add_(offset)
+                v.add_(offset.pow(2))
+        super()._post_step(taped)

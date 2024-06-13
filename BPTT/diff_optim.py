@@ -56,8 +56,9 @@ class DiffOptimizer():
             step_idx = self.cur_idx
             loss = forward_function(step_idx=step_idx, backbone=self.model, **forward_kwargs)
             backward(loss, False, False, False, True)
-            taped = not num_taped is not None and idx_ < num_steps-num_taped
+            taped = idx_ >= num_steps-num_taped or num_taped is None
             step(taped)
+        print('{} inner forward steps'.format(num_steps))
         return None
     
     def backward_loop(self, num_steps:int, meta_params:List[Tensor]):
@@ -132,9 +133,9 @@ class DiffOptimizer():
         
     ### functions resembling optimizers and their helper functions
     def step(self, taped:bool, closure:Callable=None):
-        self._pre_step(self, taped)
+        self._pre_step(taped)
         self.optimizer.step(closure=closure)
-        self._post_step(self, taped)
+        self._post_step(taped)
         return None
 
     def _pre_step(self, taped):

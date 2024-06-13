@@ -1,11 +1,7 @@
-from synset.base_synset import BaseImageSynset
 from synset.imagelab_synset import ImageLabSynSet
 from type_ import * 
 from kornia.enhance import ZCAWhitening as ZCA
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
-from augment.augment import DiffAug
-import numpy as np
 from models.utils import get_model
 
 class ImageLabelerSynSet(ImageLabSynSet):
@@ -24,8 +20,6 @@ class ImageLabelerSynSet(ImageLabSynSet):
                  init_type:str='noise_normal',
                  real_loader:DataLoader=None,
                  augment_args:dict = None):
-        self.ipc = ipc
-        self.zca = zca
         super().__init__(channel,
                          num_classes,
                          image_size,
@@ -36,8 +30,7 @@ class ImageLabelerSynSet(ImageLabSynSet):
                          False,
                          init_type,
                          real_loader,
-                         augment_args
-        )
+                         augment_args)
         self.train_labeler = train_labeler
         self.labeler_args = labeler_args
         self.labeler:Module = get_model(**labeler_args)
@@ -45,10 +38,14 @@ class ImageLabelerSynSet(ImageLabSynSet):
             self.labeler.load_state_dict(torch.load(labeler_path))
         self.labeler.to(self.device)
         self.labeler_path = labeler_path
-        self.set_trainables()
+        if self.train_labeler:
+            self.trainables['labeler'] = list(self.labeler.parameters())
+            self.flat_trainables.extend(self.trainables['labeler'])
+        
+        
     
     def set_trainables(self):
-        ImageLabSynSet.set_trainables(self)
+        super().set_trainables()
         if self.train_labeler:
             self.trainables['labeler'] = list(self.labeler.parameters())
             self.flat_trainables.extend(self.trainables['labeler'])
@@ -60,9 +57,21 @@ class ImageLabelerSynSet(ImageLabSynSet):
         return None
     
     def batch(self, batch_idx:int, batch_size:int, with_augment:bool=True, reproducible:bool=True, with_label:bool=False):
+        from torch.nn.functional import softmax
         imgs, lbs = ImageLabSynSet.batch(self, batch_idx, batch_size, with_augment, reproducible)
         tgts = self.labeler(imgs)
+        tgts = softmax(tgts, dim=1)
         if with_label:
             return imgs, tgts, lbs
         else:
             return imgs, tgts
+        
+    def train(self):
+        super().train()
+        self.labeler.train()
+        return None
+    
+    def eval(self):
+        super().eval()
+        self.labeler.eval()
+        return None

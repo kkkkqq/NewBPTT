@@ -20,7 +20,7 @@ class SynSetLoader():
         batch_idx = 0
         while unfinished:
             with torch.no_grad():
-                out = self.synset.batch(batch_idx, self.batch_size, tracked=False)
+                out = self.synset.batch(batch_idx, self.batch_size, reproducible=False)
                 btch = min(self.synset.num_items, self.batch_size)
                 num_items += btch
                 if num_items >= self.max_items:

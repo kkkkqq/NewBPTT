@@ -32,7 +32,7 @@ class ClipEMAOptimizer():
     def zero_grad(self):
         self.opt.zero_grad()
 
-    def step(self, closure):
+    def step(self, closure:Callable=None):
         from torch import no_grad
         from torch import sum as torchsum
         from torch.nn.utils import clip_grad_norm_
@@ -42,7 +42,7 @@ class ClipEMAOptimizer():
             shadow = self.ema_vals[idx]
             pas = group['params']
             with no_grad():
-                grad_norm = torchsum([torchsum(ele.grad.pow(2)) for ele in pas]).pow(0.5).item()
+                grad_norm = sum([torchsum(ele.grad.pow(2)) for ele in pas]).pow(0.5).item()
             if shadow == -1e5:
                 ema_vals[idx] = grad_norm
             else:

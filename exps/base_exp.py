@@ -16,62 +16,7 @@ import random
 from dataset.utils import get_dataset
 from ema_opt.ema_opt import ClipEMAOptimizer
 
-def evaluate_synset(eval_models_dict:dict, 
-                    num_eval:int,
-                    eval_steps:int,
-                    test_loader:DataLoader,
-                    synset:BaseImageSynset,
-                    eval_module:BaseModule,
-                    device='cuda'):
-    synset_loader = SynSetLoader(synset, synset.num_items, synset.num_items, True)
-    metrics = dict()
-    for name, args in eval_models_dict.items():
-        print('evaluating synset on', name,':')
-        model_args = args['model_args']
-        opt_args = args['opt_args']
-        mean_train_metric = dict()
-        mean_test_metric = dict()
-        for _ in range(num_eval):
-            model = get_model(**model_args)
-            model.to(device)
-            opt = get_optimizer(model.parameters(), **opt_args)
-            for _ in tqdm(range(eval_steps-1)):
-                eval_module.epoch(model, opt, synset_loader, False, True)
-            train_metric = eval_module.epoch(model, opt, synset_loader, True, True)
-            for key, val in train_metric.items():
-                print('train', key, ':', val)
-                if key not in mean_train_metric:
-                    mean_train_metric[key] = val/num_eval
-                else:
-                    mean_train_metric[key] += val/num_eval
-            test_metric = eval_module.epoch(model, opt, test_loader, True, False)
-            for key, val in test_metric.items():
-                print('test', key, ':', val)
-                if key not in mean_test_metric:
-                    mean_test_metric[key] = val/num_eval
-                else:
-                    mean_test_metric[key] += val/num_eval
-        for key, val in mean_train_metric.items():
-            print('mean train', key, 'for', name, ':', round(val, 4))
-        for key, val in mean_test_metric.items():
-            print('mean test', key, 'for', name, ':', round(val,4))
-        metrics.update({'eval/'+name+'_train_'+ key:val for key,val in mean_train_metric.items()})
-        metrics.update({'eval/'+name+'_test_'+ key:val for key,val in mean_test_metric.items()})    
-    return metrics       
 
-def save_synset(synset, path):
-    synsetcopy = copy.deepcopy(synset)
-    synsetcopy.to('cpu')
-    torch.save(synsetcopy, path)
-    return None
-
-def seed_everything(seed:int):
-	#  下面两个常规设置了，用来np和random的话要设置 
-    np.random.seed(seed) 
-    random.seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # 多GPU训练需要设置这个
-    torch.manual_seed(seed)
 
 class BaseExperiment():
 
@@ -86,6 +31,7 @@ class BaseExperiment():
         
     
     def parse_exp_config(self, config):
+        from exps.utils import seed_everything
         exp_config:dict = copy.deepcopy(config['exp_config'])
         self.seed:int = exp_config['seed']
         self.project:str = exp_config['project']
@@ -94,14 +40,15 @@ class BaseExperiment():
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
         seed_everything(self.seed)
-        self.use_wandb:bool = self.exp_config['use_wandb']
-        self.wandb_api_key:str = self.exp_config['wandb_api_key']
-        self.num_steps:int = self.exp_config['num_steps']
-        self.device = torch.device(self.exp_config['device'])
+        self.use_wandb:bool = exp_config['use_wandb']
+        self.wandb_api_key:str = exp_config['wandb_api_key']
+        self.num_steps:int = exp_config['num_steps']
+        self.device = torch.device(exp_config['device'])
         return exp_config
     
     def parse_dataset_config(self, config)->dict:
-        dataset_config = copy.deepcopy(config['dataset_config'])
+        from copy import deepcopy
+        dataset_config = deepcopy(config['dataset_config'])
         self.dataset = get_dataset(**dataset_config)
         self.dataset_aux_args = {'channel': self.dataset.channel,
                                  'num_classes': self.dataset.num_classes,
@@ -109,7 +56,8 @@ class BaseExperiment():
         return dataset_config
     
     def parse_synset_config(self, config)->dict:
-        synset_config = copy.deepcopy(config['synset_config'])
+        from copy import deepcopy
+        synset_config = deepcopy(config['synset_config'])
         synset_args:dict = synset_config['synset_args']
         if 'channel' not in synset_args:
                 synset_args.update(self.dataset_aux_args)
@@ -124,7 +72,8 @@ class BaseExperiment():
         return synset_config
     
     def parse_eval_config(self, config)->dict:
-        eval_config = copy.deepcopy(config['eval_config'])
+        from copy import deepcopy
+        eval_config = deepcopy(config['eval_config'])
         self.eval_interval:int = eval_config['eval_interval']
         self.num_eval:int = eval_config['num_eval']
         self.eval_models_dict:dict = eval_config['eval_models']
@@ -132,7 +81,8 @@ class BaseExperiment():
             if 'channel' not in args['model_args']:
                 args['model_args'].update(self.dataset_aux_args)
         self.eval_steps:int = eval_config['eval_steps']
-        self.eval_module:BaseModule = get_module(**eval_config['eval_module_args'])
+        self.eval_train_module:BaseModule = get_module(**eval_config['eval_train_module_args'])
+        self.eval_test_module:BaseModule = get_module(**eval_config['eval_test_module_args'])
         eval_batchsize = eval_config['eval_batchsize']
         self.test_loader = DataLoader(self.dataset.dst_test, eval_batchsize, pin_memory=True, num_workers=4)
         self.upload_visualize:bool = eval_config['upload_visualize']
@@ -142,13 +92,14 @@ class BaseExperiment():
         return eval_config
 
     def parse_loop_config(self, config)->dict:
-        loop_config:dict = copy.deepcopy(self.config['loop_config'])
+        from copy import deepcopy
+        loop_config:dict = deepcopy(self.config['loop_config'])
         self.bptt_type:str = loop_config['bptt_type']
         self.num_forward:int = loop_config['num_forward']
         self.num_backward:int = loop_config['num_backward']
         inner_loop_config:dict = loop_config['inner_loop_config']
-        inner_loop_type:str = inner_loop_config['loop_type']
-        inner_loop_args = inner_loop_config['loop_args']
+        inner_loop_type:str = inner_loop_config['inner_loop_type']
+        inner_loop_args = inner_loop_config['inner_loop_args']
         if 'channel' not in inner_loop_args['inner_model_args']:
             inner_loop_args['inner_model_args'].update(self.dataset_aux_args)
         if 'inner_batch_size' in inner_loop_args:
@@ -162,7 +113,9 @@ class BaseExperiment():
         else:
             inner_loop_args['device'] = self.device
         self.inner_loop_args = inner_loop_args
+        self.inner_loop_type = inner_loop_type
         self.inner_loop = None
+        inner_loop_args['batch_function'] = self.synset.batch
         return loop_config
     
     def init_wandb(self):
@@ -181,8 +134,9 @@ class BaseExperiment():
         synset_opt_args = self.synset_opt_args
         trainables:dict = synset.trainables
         synset_opts = dict()
-        for key, val in trainables:
-            assert key in synset_opt_args
+        for key, val in trainables.items():
+            if key not in synset_opt_args:
+                raise AssertionError("{} should be in synset_opt_args!".format(key))
             opt = get_optimizer(val, **synset_opt_args[key])
             if self.ema_grad_clip:
                 opt = ClipEMAOptimizer(opt, self.ema_coef)
@@ -190,27 +144,33 @@ class BaseExperiment():
         self.synset_opts = synset_opts
         return synset, synset_opts
     
-    def eval_synset(self, step, synset):
+    def eval_synset(self, step, synset, use_wandb):
         from wandb import log
+        from exps.utils import evaluate_synset
         metrics = evaluate_synset(self.eval_models_dict, 
                                   self.num_eval, 
                                   self.eval_steps,
                                   self.test_loader,
                                   synset,
-                                  self.eval_module,
+                                  self.eval_train_module,
+                                  self.eval_test_module,
                                   self.device
                                   )
-        if self.use_wandb:
+        if use_wandb:
             log(metrics, step=step)
     
-    def upload_visualize_save(self, step, synset:ImageLabSynSet):
+    def upload_visualize_save(self, 
+                              step, 
+                              synset:ImageLabSynSet, 
+                              upload_vis:bool,
+                              save_vis:bool
+                              ):
         from wandb import log, Image, Histogram
         from torchvision.utils import save_image
-        upload_vis = self.use_wandb and self.upload_visualize and (step+1)%self.upload_visualize_interval==0
-        save_vis = self.save_visualize and (step+1)%self.save_visualize_interval==0
+        from exps.utils import save_synset
         if upload_vis or save_vis:
-            disp_imgs = synset.images_on_display(None)
-            imgs_sample = synset.detached_images_sample(None)
+            disp_imgs = synset.images_on_display(None).to('cpu')
+            imgs_sample = synset.detached_images_sample(None).to('cpu')
         if upload_vis:
             log({'Images': Image(disp_imgs)}, step=step)
             log({'Pixels': Histogram(imgs_sample)}, step=step)
@@ -219,7 +179,13 @@ class BaseExperiment():
             save_image(imgs_sample, self.save_dir+'/'+str(step)+'.jpg', nrow = synset.num_classes)
             save_synset(synset, self.save_dir+'/current_synset.pt')
 
-    def loop(self,
+    def _batch_kwargs(self):
+        return dict()
+    
+    def _meta_loss_kwargs(self):
+        return dict()
+
+    def one_loop(self,
              innerloop:InnerLoop,
              synset:ImageLabSynSet,
              synset_opts:Dict[str,Union[Optimizer, ClipEMAOptimizer]],
@@ -227,14 +193,16 @@ class BaseExperiment():
              num_forward:int, 
              num_backward:int,
              step:int,
-             batch_kwargs:dict=dict(),
-             meta_loss_kwargs:dict=dict(),
+             use_wandb:bool,
+             batch_kwargs=dict(),
+             meta_loss_kwargs=dict()
              ):
         from wandb import log
+        from numpy.random import randint
         for opt in synset_opts.values():
             opt.zero_grad()
         if bptt_type in ['ratbptt', 'rat_bptt']:
-            num_forward = np.random.randint(num_backward, num_forward)    
+            num_forward = randint(num_backward, num_forward)    
         meta_loss_item = innerloop.loop(num_forward, 
                                         num_backward,
                                         synset.flat_trainables,
@@ -244,20 +212,58 @@ class BaseExperiment():
         for opt in synset_opts.values():
             opt.step()
         
-        if self.use_wandb:
+        if use_wandb and step%10==0:
             metric = {'meta_loss': meta_loss_item}
             for key, val in synset_opts.items():
                 if isinstance(val, ClipEMAOptimizer):
                     grad_norms = val.grad_norms
                     emas = val.ema_vals
-                    for grp_idx in enumerate(grad_norms):
-                        metric['_'.join([key, 'gradnorm', grp_idx])] = grad_norms[grp_idx]
-                        metric['_'.join([key, 'ema_val', grp_idx])] = emas[grp_idx]
+                    for grp_idx, (grad_norm, ema) in enumerate(zip(grad_norms, emas)):
+                        metric['_'.join([key, 'gradnorm', str(grp_idx)])] = grad_norm
+                        metric['_'.join([key, 'ema_val', str(grp_idx)])] = ema
             log(metric, step=step)
+        print('meta loss at step {}: {}'.format(step, meta_loss_item))
+        return None
         
-        if step%10==0:
-            print('meta loss at step {}: {}'.format(step, meta_loss_item))
-        
+    def run_exp(self):
+        self.init_wandb()
+        #prepare variables used in the loop
+        inner_loop = self.inner_loop
+        bptt_type =self.bptt_type
+        num_forward = self.num_forward
+        num_backward = self.num_backward
+        synset, opts = self.prepare_synset_and_opts()
+        use_wandb = self.use_wandb
+        upload_vis = use_wandb and self.upload_visualize
+        upload_visualize_interval_ = self.upload_visualize_interval
+        save_vis = self.save_visualize
+        save_visualize_interval_ = self.save_visualize_interval
+        eval_interval = self.eval_interval
+        eval_synset = self.eval_synset
+        upload_visualize_save = self.upload_visualize_save
+        one_loop = self.one_loop
+        batch_kwargs = self._batch_kwargs()
+        meta_loss_kwargs = self._meta_loss_kwargs()
+        #looping
+        for it in range(self.num_steps+1):
+            synset.shuffle()
+            one_loop(inner_loop,
+                    synset,
+                    opts,
+                    bptt_type,
+                    num_forward,
+                    num_backward,
+                    it,
+                    use_wandb,
+                    batch_kwargs,
+                    meta_loss_kwargs
+                    )
+            if (it+1)%eval_interval==0:
+                eval_synset(it, synset, use_wandb)
+            upload_vis_ = upload_vis and (it+1)%upload_visualize_interval_==0
+            save_vis_ = save_vis and (it+1)%save_visualize_interval_==0
+            upload_visualize_save(it, synset, upload_vis_, save_vis_)
+
                 
 
             

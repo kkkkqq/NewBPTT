@@ -18,6 +18,7 @@ class ClassifierModule(BaseModule):
         return None
     
     def forward_loss(self, backbone: Module, images:Tensor, targets:Tensor) -> tuple:
+        from torch.nn.functional import softmax
         if self._device is None:
             self._device = next(backbone.parameters()).device
         _device = self._device

@@ -23,10 +23,10 @@ class InnerLoop():
         self.backbone = None
         self.diff_opt = None
 
-    def forward_function(self, step_idx:int, backbone:Module, batch_kwargs:dict):
+    def forward_function(self, step_idx:int, backbone:Module, **batch_kwargs):
         batch_out = self.batch_function(batch_idx=step_idx, batch_size=self.inner_batch_size, **batch_kwargs)
-        loss = self.inner_module.forward_loss(backbone=backbone, *batch_out)
-        return loss
+        forward_loss_out = self.inner_module.forward_loss(backbone, *batch_out)
+        return forward_loss_out[0]
     
     def meta_loss_and_backward(self, backbone:Module, **meta_loss_kwargs)->float:
         raise NotImplementedError

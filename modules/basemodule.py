@@ -38,7 +38,7 @@ class BaseModule():
             opt.step()
         else:
             with torch.no_grad():
-                forward_out = self.forward_loss(backbone, batch_in)
+                forward_out = self.forward_loss(backbone, *batch_in)
         if record_metric:
             return self.post_loss(*forward_out)
         else:

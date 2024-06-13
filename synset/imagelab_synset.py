@@ -34,15 +34,21 @@ class ImageLabSynSet(BaseImageSynset):
         self.labels:Tensor = torch.repeat_interleave(torch.arange(self.num_classes), self.ipc, dim=0).to('cpu')#labels are not targets, it is always on cpu.
         self._labels:Tensor=self.labels.to(self.device)
         self.targets:Tensor = F.one_hot(self.labels, num_classes).to(torch.float).to(self.device)
-        self.set_trainables()
+        self.flat_trainables = []
+        if self.train_images:
+            self.trainables['images'] = [self.images]
+            self.flat_trainables.append(self.images)
+        if self.train_targets:
+            self.trainables['targets'] = [self.targets]
+            self.flat_trainables.append(self.targets)
         self.init_type = init_type
         init = self.init_type.lower().split('_')
         self.real_loader = real_loader
         if 'noise' in init:
             if 'normal' in init:
-                self.noise_init(True)
+                self.noise_init_images(self.images, True)
             else:
-                self.noise_init(normalize=False)
+                self.noise_init_images(self.images,normalize=False)
         elif 'real' in init:
             if real_loader is None:
                 raise AssertionError("chose real init, but real loader is None!")
@@ -59,7 +65,6 @@ class ImageLabSynSet(BaseImageSynset):
             self.augment = DiffAug(**self.augment_args)
 
         self.seed_shift = np.random.randint(10000)
-        self.train()
 
     def __getitem__(self, idxes):
         images, targets = self.images[idxes], self.targets[idxes]
@@ -123,7 +128,7 @@ class ImageLabSynSet(BaseImageSynset):
     
     def images_on_display(self, ipc=None, clip_val=None, upsample_factor=None):
         with torch.no_grad():
-            images = self.detached_images(ipc)
+            images = self.detached_images_sample(ipc)
             if self.zca is not None:
                 images = self.zca_inverse_images(images, self.zca)
             if clip_val is not None:

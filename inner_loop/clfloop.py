@@ -52,7 +52,8 @@ class CLFInnerLoop(InnerLoop):
                 images = images[:batch_size]
                 targets = targets[:batch_size]
             num_data += batch_size
-            meta_loss = forwardloss(backbone, images, targets)
+            meta_out = forwardloss(backbone, images, targets)
+            meta_loss = meta_out[0]
             weight = float(batch_size)/float(data_per_loop)
             metabackward(meta_loss, weight)
             meta_loss_item += meta_loss.item()*weight

@@ -47,7 +47,7 @@ class BaseSynSet():
     def to(self, device):
         raise NotImplementedError
     
-    def batch(self, batch_idx:int, batch_size:int, class_idx:int=None, tracked:bool=True):
+    def batch(self, batch_idx:int, batch_size:int, class_idx:int=None, reproducible:bool=True):
         raise NotImplementedError
 
     def shuffle(self):
