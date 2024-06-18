@@ -88,6 +88,7 @@ class ImageLabSynSet(BaseImageSynset):
         return None
     
     def batch(self, batch_idx:int, batch_size:int, with_augment:bool=True, reproducible:bool=True):
+        from torch.nn.functional import softmax
         sampler = self.sampler
         images = self.images
         targets = self.targets
@@ -104,6 +105,7 @@ class ImageLabSynSet(BaseImageSynset):
             else:
                 seed = -1
             imgs = self.augment(imgs, seed=seed)
+        tgts = softmax(tgts, dim=1)
         return imgs, tgts
     
     def shuffle(self):

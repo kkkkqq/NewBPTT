@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES']='3'
+os.environ['CUDA_VISIBLE_DEVICES']='1'
 from exps.imglbrclf_exp import ImgLbrClfExp
 import yaml
 import argparse

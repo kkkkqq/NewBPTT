@@ -1,104 +1,94 @@
 from BPTT.diff_optim import DiffOptimizer
 from type_ import *
 import torch
-
+from functools import partial
 class DiffAdam(DiffOptimizer):
 
     def __init__(self,
                  model:Module, 
                  optimizer:Optimizer, 
                  tape_on_device:bool=True,
-                 paidx_grpidx_map:List[List[Tuple[int,int]]]=None)->None:
-        super().__init__(model, optimizer, True, tape_on_device, paidx_grpidx_map)
-        self.dLdv_groups:List[Tensor] = None
-        self.dLdm_groups:List[Tensor] = None
+                 _attpa2modpa_idxes:List[int]=None)->None:
+        super().__init__(model, optimizer, tape_on_device, _attpa2modpa_idxes)
+        self.state_vars.update({'dLdm_groups':[],
+                                'dLdv_groups':[],
+                                'v_groups':[],
+                                't_groups':[]})
+        self.states_tape_dct = {'m_groups':[], 'v_groups':[], 't_groups':[]}
+        self.coefs_tape_dct = {'lr_groups':[],
+                               'beta1_groups':[],
+                               'beta2_groups':[],
+                               'eps_groups':[],
+                               'maximize_groups':[],
+                               'weight_decay_groups':[],
+                               }
+        for group in optimizer.param_groups:
+            if group['amsgrad']:
+                raise NotImplementedError('havenot implement amsgrad for adam!')
 
-    def update_backprop_state(self):
+    def update_backprop_state(self, 
+                              train_lr:bool,
+                              params:List[List[Tensor]],
+                              grads:List[List[Tensor]],
+                              group_startends:List[Tuple[int,int]],
+                              dLdw_groups:List[Tensor],
+                              dLdgrad_groups:List[Tensor],
+                              dLdm_groups:List[Tensor],
+                              dLdv_groups:List[Tensor],
+                              m_groups:List[Tensor],
+                              v_groups:List[Tensor],
+                              lr_groups:List[float],
+                              beta1_groups:List[float],
+                              beta2_groups:List[float],
+                              eps_groups:List[float],
+                              weight_decay_groups:List[float],
+                              maximize_groups:List[bool],
+                              t_groups:List[Tensor]
+                              ):
         from torch import zeros_like, no_grad, cat, sqrt, tensor
-        from numpy import power
-        dLdw_groups = self.dLdw_groups
-        if self.dLdv_groups is None:
-            dLdv_groups:List[Tensor] = []
-            self.dLdv_groups = dLdv_groups
-            for dLdw in dLdw_groups:
-                dLdv_groups.append(zeros_like(dLdw))
-        if self.dLdm_groups is None:
-            dLdm_groups:List[Tensor] = []
-            self.dLdm_groups = dLdm_groups
-            for dLdw in dLdw_groups:
-                dLdm_groups.append(zeros_like(dLdw))
-        dLdv_groups = self.dLdv_groups
-        dLdm_groups = self.dLdm_groups
-        dLdgrad_groups = []
-        self.dLdgrad_groups = dLdgrad_groups
-        states = self.states_tape[self.cur_idx]
-        param_groups = self.optimizer.param_groups
-        grads_ = self._model_grads_after_backward
-        gts = [grads_[startend[0]:startend[1]] for startend in self._pa_groups_startend_lst]
         with no_grad():
+            if len(dLdm_groups)==0:
+                for dLdw_ in dLdw_groups:
+                    dLdm_groups.append(zeros_like(dLdw_))
+                    dLdv_groups.append(zeros_like(dLdw_))
             # for idx, group in enumerate(param_groups):
-            for group_idx, group in enumerate(param_groups):
-                dLdw = dLdw_groups[group_idx]
-                dLdm = dLdm_groups[group_idx]
-                dLdv = dLdv_groups[group_idx]
-                state = states[group_idx]
-                group = param_groups[group_idx]
-                gt_ = gts[group_idx]
-            # for dLdw, dLdm, dLdv, state, group, gt in zip(dLdw_groups, dLdm_groups, dLdv_groups, states, param_groups, gts):
-                # gt = self.flatten([ele.grad.detach() for ele in group['params']]).detach()
-                gt = cat([ele.detach().flatten() for ele in gt_])
-                lr = group['lr']
-                beta1 = tensor(group['betas'][0])
-                beta2 = tensor(group['betas'][1])
-                eps = group['eps']
-                weight_decay = group['weight_decay']
-                maximize = group['maximize']
-                m = cat([dct['exp_avg'].flatten() for dct in state])
-                v = cat([dct['exp_avg_sq'].flatten() for dct in state])
-                # m[m==0] = 1e-10#如果回头还是爆炸，就把adam的step改一下，让它在第一个step处加一个正态offset
-                # v[v==0] = 1e-20
-                # m.add_(torch.randn_like(m).mul(1e-10))
-                # v.add_(torch.randn_like(v).mul(1e-20))
-                #m.add_(1e-8)# offset m and v by a very small amount, keep dLdv from exploding
-                #v.add_(1e-16)
-                t = state[0]['step']
+            dLdgrad_groups.clear()
+            groups = zip(group_startends,
+                      dLdw_groups, 
+                      dLdm_groups, 
+                      dLdv_groups, 
+                      t_groups,
+                      m_groups, 
+                      v_groups,
+                      lr_groups,
+                      beta1_groups,
+                      beta2_groups,
+                      eps_groups,
+                      weight_decay_groups,
+                      maximize_groups,
+                      )
+            for (start,end), dLdw, dLdm, dLdv, t, m, v, lr, beta1, beta2, eps, weight_decay, maximize in groups:
+                if m.device != dLdw.device:
+                    device_ = dLdw.device
+                    m = m.to(device_)
+                    v = v.to(device_)
+                gt = cat([ele.detach().flatten() for ele in grads[start:end]])
+                beta1, beta2 = tensor(beta1), tensor(beta2)
                 omb1 = 1.-beta1
                 omb1t = 1.- beta1.pow(t)
                 omb2 = 1.-beta2
                 omb2t = 1. - beta2.pow(t)
+                rtvdomb2t = sqrt(v.div(omb2t))
+                if train_lr:
+                    a = m.div(omb1t).div(rtvdomb2t.add(eps))
+                    self.lr_grad.add_(dLdw.dot(a).mul(-1))
                 if maximize:
                     gt.mul_(-1.)
                 if weight_decay!=0:
-                    w = torch.cat([ele.detach().flatten() for ele in group['params']])
+                    w = cat([ele.flatten() for ele in params[start:end]])
                     gt.add_(w.mul(weight_decay))
-                # sqrt_vdivomb2t = v.div_(omb2t).pow_(0.5)
-                # print('max m', torch.max(torch.abs(m)).item())
-                # print('min m', torch.min(torch.abs(m)).item())
-                # print('max v', torch.max(torch.abs(v)).item())
-                # print('min v', torch.min(torch.abs(v)).item())
-                # print('max sqrtvdivomb2t', torch.max(torch.abs(sqrt_vdivomb2t)).item())
-                # print('min sqrtvdivomb2t', torch.min(torch.abs(sqrt_vdivomb2t)).item())
-                # dLdm.mul_(beta1).sub_(dLdw.mul(lr/omb1t).div(sqrt_vdivomb2t.add(eps)))
-                # dLdv.mul_(beta2)
-                # # print('max dLdv before adding', torch.max(torch.abs(dLdv)).item())
-                # dLdv_add = m.mul_(lr/omb1t/omb2t/2.0).mul_(dLdw)
-                # # print('max additive before division', torch.max(torch.abs(dLdv_add)).item())
-                # dLdv_add.div_(sqrt_vdivomb2t)
-                # # print('max additive after first division', torch.max(torch.abs(dLdv_add)).item())
-                # dLdv_add.div_(sqrt_vdivomb2t.add_(eps).pow_(2))# this is where dLdv explodes if v and m are not slighted offset.
-                # # print('epsilon: ', eps)
-                # # print('max second division:', torch.max(torch.abs(sqrt_vdivomb2t.add(eps).pow(2))).item())
-                # # print('min second division:', torch.min(torch.abs(sqrt_vdivomb2t.add(eps).pow(2))).item())
-                # # print('max additive after division', torch.max(torch.abs(dLdv_add)).item())
-                # #dLdv.add_(dLdw.mul(m.mul(lr/omb1t/omb2t/2.0)).div(sqrt_vdivomb2t).div(sqrt_vdivomb2t.add(eps).pow(2)))
-                # dLdv.add_(dLdv_add)
-                # # print('max gt', torch.max(torch.abs(gt)).item())
-                # # print('max dLdv', torch.max(torch.abs(dLdv)).item())
-                # # print('max dLdm', torch.max(torch.abs(dLdm)).item())
-                # # print('omb2', omb2)
-                # # print('omb1', omb1)
-                dLdm.mul_(beta1).sub_(dLdw.mul(lr).div(omb1t).div(sqrt(v.div(omb2t)).add(eps)))
-                dLdv.mul_(beta2).add_(dLdw.mul(lr).mul(m).div(omb1t).div(omb2t).div(2).div(sqrt(v.div(omb2t))).div(sqrt(v.div(omb2t)).add(eps).pow(2)))
+                dLdm.mul_(beta1).sub_(dLdw.mul(lr).div(omb1t).div(rtvdomb2t.add(eps)))
+                dLdv.mul_(beta2).add_(dLdw.mul(lr).mul(m).div(omb1t).div(omb2t).div(2).div(rtvdomb2t).div(rtvdomb2t.add(eps).pow(2)))
                 gt.mul_(2.*omb2).mul_(dLdv).add_(dLdm.mul(omb1))
                 if weight_decay!=0:
                     dLdw.add_(gt.mul(weight_decay))
@@ -109,13 +99,75 @@ class DiffAdam(DiffOptimizer):
                 # print('max dLdgt', torch.max(torch.abs(gt)).item())
         return None
     
-    def _post_step(self, taped):
-        if self.cur_idx==0:
-            #这一步是给初始的m和v加offset，不然v有些元素是0会爆炸。
-            for st_dt in self.optimizer.state.values():
-                m = st_dt['exp_avg']
-                v = st_dt['exp_avg_sq']
-                offset = torch.randn_like(m)*1e-10
-                m.add_(offset)
-                v.add_(offset.pow(2))
-        super()._post_step(taped)
+    def _pre_step(self,
+                  taped,
+                  tape_on_device,
+                  model_tape):
+        from torch import no_grad, randn_like
+        super()._pre_step(taped, tape_on_device, model_tape)
+        if self.cur_idx == 0:
+            with no_grad():
+                for pa in self.attached_params:
+                    pa.grad.add_(randn_like(pa)*1e-10)
+
+    def _post_step(self, 
+                   taped,
+                   tape_on_device,
+                   state_tapes_dct,
+                   coef_tapes_dct):
+        from torch import cat
+        if taped:
+            state = self.opt_state
+            param_groups = self.opt_param_groups
+            groups_tup = [[] for _ in range(9)]
+            state_keys = ['m_groups', 'v_groups', 't_groups']
+            coef_keys = ['lr_groups', 'beta1_groups', 'beta2_groups', 'eps_groups', 'maximize_groups', 'weight_decay_groups']
+            for group in param_groups:
+                pas = group['params']
+                m_lst = []
+                v_lst = []
+                t_lst = []
+                for pa in pas:
+                    dct = state[pa]
+                    m_lst.append(dct['exp_avg'].flatten())
+                    v_lst.append(dct['exp_avg_sq'].flatten())
+                    t_lst.append(dct['step'].item())
+                    
+                m = cat(m_lst, dim=0)
+                v = cat(v_lst, dim=0)
+                t_set = set(t_lst)
+                if len(t_set)>1:
+                    raise AssertionError("'step' in optimizer differ for each params in the param group!")
+                else:
+                    t = t_set.pop()
+                if not tape_on_device:
+                    m = m.to('cpu')
+                    v = v.to('cpu')
+                lr = group['lr']
+                betas = group['betas']
+                beta1, beta2 = betas
+                eps = group['eps']
+                maximize=group['maximize']
+                weight_decay=group['weight_decay']
+                items = (m,v,t,lr,beta1,beta2,eps,maximize,weight_decay)
+                for groups, item in zip(groups_tup, items):
+                    groups.append(item)
+                state_groups = groups_tup[:3]
+                coef_groups = groups_tup[3:]
+            states = {k:v for k,v in zip(state_keys, state_groups)}
+            coefs = {k:v for k,v in zip(coef_keys, coef_groups)}
+            for stk in state_keys:
+                state_tapes_dct[stk].append(states[stk])
+            for ck in coef_keys:
+                coef_tapes_dct[ck].append(coefs[ck])
+        else:
+            for val in state_tapes_dct.values():
+                val.append(None)
+            for val in coef_tapes_dct.values():
+                val.append(None)
+        return None
+
+
+                
+
+

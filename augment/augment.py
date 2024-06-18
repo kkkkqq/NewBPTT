@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from contextlib import contextmanager
+from warnings import warn
 
 
 class DiffAug():
@@ -20,6 +21,8 @@ class DiffAug():
         self.brightness = 1.0
         self.saturation = 2.0
         self.contrast = 0.5
+        self.rrc_aspect_ratios = (0.75, 4/3.)
+        self.rrc_area_scales = (0.25, 1.0)
 
         self.batch = batch
 
@@ -40,6 +43,10 @@ class DiffAug():
                     self.cutout = True
                 else:
                     self.strategy.append(aug)
+                if aug == 'rrc':
+                    if not self.batch:
+                        warn("RRC does not have an unbatched version, the rrc will be batched operation!")
+                    
 
         self.aug_fn = {
             'color': [self.brightness_fn, self.saturation_fn, self.contrast_fn],
@@ -49,6 +56,7 @@ class DiffAug():
             'scale': [self.scale_fn],
             'rotate': [self.rotate_fn],
             'translate': [self.translate_fn],
+            'rrc':[self.rrc_fn]
         }
 
     def __call__(self, x, single_aug=True, seed=-1):
@@ -344,3 +352,34 @@ class DiffAug():
         mask[grid_batch, grid_x, grid_y] = 1.
         x = x * mask.unsqueeze(1)
         return x
+
+    def rrc_fn(self, x:torch.Tensor, batch=True):
+        from torchvision.transforms.functional import resized_crop
+        from numpy import sqrt, ceil
+        from numpy.random import rand
+        n,c,h,w = x.shape
+        ratios = self.rrc_aspect_ratios
+        scales = self.rrc_area_scales
+        randr, rands = rand(2)
+        ratio = ratios[0]+randr*(ratios[1]-ratios[0])
+        scale = scales[0]+rands*(scales[1]-scales[0])
+        sub_squarelen = sqrt(h*w*scale)
+        rootratio = sqrt(ratio)
+        smallh = int(sub_squarelen*rootratio)
+        smallw = int(sub_squarelen/rootratio)
+        randh, randw = rand(2)
+        # max_h = h - smallh
+        # max_w = w - smallw
+        top = int(ceil(randh*(h-smallh)))
+        left = int(ceil(randw*(w-smallw)))
+        x = resized_crop(x, top, left, smallh, smallw, (h, w))
+        return x
+
+
+
+
+            
+
+
+
+

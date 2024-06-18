@@ -9,29 +9,68 @@ class DiffOptimizer():
     def __init__(self, 
                  model:Module, 
                  optimizer:Optimizer, 
-                 state_tape_required:bool, 
                  tape_on_device:bool=True,
-                 paidx_grpidx_map:List[List[Tuple[int,int]]]=None)->None:
+                 _attpa2modpa_idxes:List[int]=None
+                 )->None:
         self.model:Module = model
         self.optimizer:Optimizer = optimizer
-        if paidx_grpidx_map is None:
-            self.paidx_grpidx_map:List[List[Tuple[int,int]]] = self.model_opt_mapping(model, optimizer)
+        self.opt_state = optimizer.state
+        self.opt_param_groups = optimizer.param_groups
+        
+        param_groups = optimizer.param_groups
+        attached_params:List[Tensor] = []
+        group_startends:List[Tuple[int,int]] = []
+        attached_params, group_startends = self.unroll_param_groups(param_groups)
+        attpa2modpa_idxes:List[int] = []
+        model_params = list(model.parameters())
+        if _attpa2modpa_idxes is None:
+            attpa2modpa_idxes = self.attpa2modpa(attached_params, model_params)
         else:
-            self.paidx_grpidx_map = paidx_grpidx_map
-        self.device = next(model.parameters()).device
+            attpa2modpa_idxes = _attpa2modpa_idxes
+        self.attached_params = attached_params
+        self.group_startends = group_startends
+        self.attpa2modpa_idxes = attpa2modpa_idxes
+        self.device = model_params[0].device
         self.tape_on_device:bool = tape_on_device
         self.model_tape:List[Module] = []
-        self.states_tape:List[List[List[Dict[str,Tensor]]]] = []
-        self.state_tape_required:bool=state_tape_required # 有一些优化器在反传时不需要states，比如SGD
-        self._model_grads_after_backward:List[Tensor] = []
-        self.dLdw_groups:List[Tensor] = []
-        self.len_pa_groups:List[int] = []
-        self._pa_groups_startend_lst:List[Tuple[int,int]] = []
-        self.dLdw_groups, self.len_pa_groups, self._pa_groups_startend_lst = self.prepare_dLdw()
-        self.dLdgrad_groups = []
+        self.states_tape_dct:Dict[str, List[List[Tensor]]] = dict()#for adam, {'m':flat_groups_tape, 'v':flat_groups_tape}
+        self.coefs_tape_dct:Dict[str, List[list]] = {'lr_groups':None}# tapes for 'lr_groups', 'eps_groups', etc. coefs stored in groups.
+        self.state_vars:Dict[str,List[Tensor]] = {'dLdw_groups':[], 'dLdgrad_groups':[]}
+        self.group_coefs:Dict[str,list] = {'lr_groups':[]}
         self.cur_idx:int = 0
         self._forward_function:Callable = None
         self._forward_kwargs:dict = None
+        self.lr_grad:float = None
+
+    @staticmethod
+    def unroll_param_groups(param_groups:dict):
+        attached_params = []
+        group_startends:List[Tuple[int,int]] = []
+        start_idx = 0
+        for group in param_groups:
+            pas = group['params']
+            attached_params.extend(pas)
+            end_idx = start_idx + len(pas)
+            group_startends.append((start_idx, end_idx))
+            start_idx = end_idx
+        return attached_params, group_startends
+    
+    @staticmethod
+    def attpa2modpa(attached_params, model_params):
+        attpa2modpa_idxes = []
+        paslen = len(model_params)
+        for attpa in attached_params:
+            for paidx,pa in enumerate(model_params):
+                if attpa is pa:
+                    attpa2modpa_idxes.append(paidx)
+                    break
+                if paidx+1 == paslen and not attpa is pa:
+                    raise AssertionError("model_params do not contain attached_params {}!".format(attpa))
+        return attpa2modpa_idxes
+    
+    @staticmethod
+    def group_params(params:List[Tensor], group_startends:List[Tuple[int,int]]):
+        return [params[start:end] for start, end in group_startends]
         
     ### major wrapper functions
     def forward_loop(self, 
@@ -48,20 +87,78 @@ class DiffOptimizer():
         """
         self._forward_function = forward_function
         self._forward_kwargs = forward_kwargs
+        tape_on_device = self.tape_on_device
         zero_grad = self.zero_grad
         backward = self.backward
         step = self.step
+        params = self.attached_params
+        state_tapes_dct = self.states_tape_dct
+        coef_tapes_dct = self.coefs_tape_dct
+        model_tape = self.model_tape
         for idx_ in range(num_steps):
             zero_grad()
             step_idx = self.cur_idx
             loss = forward_function(step_idx=step_idx, backbone=self.model, **forward_kwargs)
-            backward(loss, False, False, False, True)
+            backward(loss, params, False, False, False, True)
             taped = idx_ >= num_steps-num_taped or num_taped is None
-            step(taped)
+            step(taped, None, tape_on_device, model_tape, state_tapes_dct, coef_tapes_dct)
         print('{} inner forward steps'.format(num_steps))
         return None
     
-    def backward_loop(self, num_steps:int, meta_params:List[Tensor]):
+    def meta_backward(self, 
+                      meta_loss:Tensor, 
+                      weight:float=1., 
+                      dLdw_groups:List[Tensor]=None, 
+                      params:List[Tensor]=None, 
+                      group_startends:List[Tuple[int,int]]=None,
+                      _delete_optimizer:bool=True,
+                      _backward_handle:Callable=None):
+        '''
+        Call this function after the computation of meta loss.\\
+        If meta loss is computed in batches, call this function
+        multiple times specifying weight. The resulting gradient
+        will be a weighted sum.//
+        If dLdw_groups is None, backward in-place update will be on 
+        self.state_var['dLdw_groups']; 
+        otherwise it in-place modifies dLdw_groups and returns it. 
+        '''
+        from torch import cat, no_grad
+        meta_loss = meta_loss.mul(weight)
+        if _backward_handle is None:
+            self_backward = self.backward
+        else:
+            self_backward = _backward_handle
+        grads = self_backward(loss=meta_loss, 
+                              params = params,
+                              retain_graph=False, 
+                              create_graph=False,
+                              accum_grad=False,
+                              update_grad=False)
+        if group_startends is None:
+            group_startends = self.group_startends
+        grad_groups:List[List[Tensor]] = [grads[start:end] for start,end in group_startends]
+        with no_grad():
+            if dLdw_groups is None:
+                dLdw_groups = self.state_vars['dLdw_groups']
+            if len(dLdw_groups)!=0:
+                for grads_, dLdw in zip(grad_groups, dLdw_groups):
+                    dLdw.add_(cat([grad_.flatten() for grad_ in grads_]))
+            else:
+                for grads_ in grad_groups:
+                    dLdw_groups.append(cat([grad_.flatten() for grad_ in grads_]))
+        if _delete_optimizer:
+            self.optimizer = None
+            self.opt_state = None
+            self.opt_param_groups = None
+            # self.attached_params = None
+            
+        
+        return dLdw_groups
+
+    def backward_loop(self, 
+                      num_steps:int, 
+                      meta_params:List[Tensor],
+                      trainable_lr:bool=False):
         '''
         Wrapper function for backward inner loop.\\
         It computes the meta grads on meta_params for each step and accumulates
@@ -73,12 +170,35 @@ class DiffOptimizer():
         forward_function = self._forward_function
         forward_kwargs = self._forward_kwargs
         backprop_step = self.backprop_step
+        state_vars = self.state_vars
+        coefs_tape_dct = self.coefs_tape_dct
+        attpa2modpa_idxes = self.attpa2modpa_idxes
+        coef_tapes = coefs_tape_dct.items()
+        state_tapes = self.states_tape_dct.items()
+        group_startends = self.group_startends
         for _ in range(num_steps):
-            model = roll_back()
-            zero_grad()
-            loss = forward_function(step_idx=self.cur_idx, backbone=model, **forward_kwargs)
-            backward(loss, True, True, False, False)
-            backprop_step(meta_params, True, True)
+            cur_idx, model, attached_params = roll_back(attpa2modpa_idxes=attpa2modpa_idxes)
+            group_coefs = {coef:coef_tape[cur_idx] for coef, coef_tape in coef_tapes}
+            for state_key, state_tape in state_tapes:
+                state_vars[state_key] = state_tape[cur_idx]
+            zero_grad(True, attached_params)
+            loss = forward_function(step_idx=cur_idx, backbone=model, **forward_kwargs)
+            grads = backward(loss=loss, 
+                            params=attached_params, 
+                            create_graph=True, 
+                            retain_graph = True, 
+                            accum_grad=False, 
+                            update_grad=False)
+            backprop_step(grads=grads,
+                          attached_params=attached_params,
+                          group_startends=group_startends,
+                          meta_params=meta_params, 
+                          update_bp_states=True,
+                          state_vars=state_vars,
+                          group_coefs=group_coefs,
+                          accum_grad=True,
+                          train_lr=trainable_lr)
+
         return None
 
 
@@ -89,77 +209,114 @@ class DiffOptimizer():
 
 
     ### helper function for init
-    @staticmethod
-    def model_opt_mapping(model:Module, optimizer:Optimizer)->List[List[Tuple[int,int]]]:
-        '''helper function for establishing a map from idxes of params in model to idxes of groups and idxes in groups.'''
-        params = model.parameters()
-        param_groups = optimizer.param_groups
-        paidx_grpidx_map = []
-        for pa in params:
-            #对model的每个param
-            grpidx_lst:List[Tuple[int,int]] = []
-            for gidx, group in enumerate(param_groups):
-                #对opt的每个param groups
-                #检查pa是否在这个groups里并返回它的idx
-                g_pas:List[Tensor] = group['params']
-                pos_lst = [tsr is pa for tsr in g_pas]
-                try:
-                    pos_idx = pos_lst.index(True)
-                except:
-                    continue
-                #如果在，就记录pa所在的groupidx和posidx
-                grpidx_lst.append((gidx, pos_idx))
-            #在paidx_grpidx_map的这个param对应的idx处记录[(grp_idx, pos_idx), (grp_idx, pos_idx),...]
-            paidx_grpidx_map.append(grpidx_lst)
-        return paidx_grpidx_map
+    # @staticmethod
+    # def model_opt_mapping(model:Module, optimizer:Optimizer)->List[List[Tuple[int,int]]]:
+    #     '''helper function for establishing a map from idxes of params in model to idxes of groups and idxes in groups.'''
+    #     params = model.parameters()
+    #     param_groups = optimizer.param_groups
+    #     paidx_grpidx_map = []
+    #     for pa in params:
+    #         #对model的每个param
+    #         grpidx_lst:List[Tuple[int,int]] = []
+    #         for gidx, group in enumerate(param_groups):
+    #             #对opt的每个param groups
+    #             #检查pa是否在这个groups里并返回它的idx
+    #             g_pas:List[Tensor] = group['params']
+    #             pos_lst = [tsr is pa for tsr in g_pas]
+    #             try:
+    #                 pos_idx = pos_lst.index(True)
+    #             except:
+    #                 continue
+    #             #如果在，就记录pa所在的groupidx和posidx
+    #             grpidx_lst.append((gidx, pos_idx))
+    #         #在paidx_grpidx_map的这个param对应的idx处记录[(grp_idx, pos_idx), (grp_idx, pos_idx),...]
+    #         paidx_grpidx_map.append(grpidx_lst)
+    #     return paidx_grpidx_map
 
-    def prepare_dLdw(self):
-        from numpy import sum
-        from torch import zeros
-        self.dLdw_groups = []
-        self.len_pa_groups = []
-        self._pa_groups_startend_lst = []
-        start_idx = 0
-        for group in self.optimizer.param_groups:
-            params:List[Tensor] = group['params']
-            full_len = sum([pa.numel() for pa in params])
-            self.dLdw_groups.append(zeros(full_len, device=self.device))
-            grouplen = len(params)
-            self.len_pa_groups.append(grouplen)
-            end_idx = start_idx + grouplen
-            self._pa_groups_startend_lst.append((start_idx, end_idx))
-            start_idx = end_idx
-        return self.dLdw_groups, self.len_pa_groups, self._pa_groups_startend_lst
+    # def prepare_dLdw(self):
+    #     from numpy import sum
+    #     from torch import zeros
+    #     self.dLdw_groups = []
+    #     self.len_pa_groups = []
+    #     self._pa_groups_startend_lst = []
+    #     start_idx = 0
+    #     for group in self.optimizer.param_groups:
+    #         params:List[Tensor] = group['params']
+    #         full_len = sum([pa.numel() for pa in params])
+    #         self.dLdw_groups.append(zeros(full_len, device=self.device))
+    #         grouplen = len(params)
+    #         self.len_pa_groups.append(grouplen)
+    #         end_idx = start_idx + grouplen
+    #         self._pa_groups_startend_lst.append((start_idx, end_idx))
+    #         start_idx = end_idx
+    #     return self.dLdw_groups, self.len_pa_groups, self._pa_groups_startend_lst
         
     ### functions resembling optimizers and their helper functions
-    def step(self, taped:bool, closure:Callable=None):
-        self._pre_step(taped)
+    def step(self, 
+             taped:bool, 
+             closure:Callable=None, 
+             tape_on_device:bool=True,
+             model_tape:List[Module]=None,
+             state_tapes_dct:Dict[str,List[Tensor]]=None,
+             coef_tapes_dct:Dict[str,List[list]]=None
+            ):
+        if model_tape is None:
+            model_tape = self.model_tape
+        self._pre_step(taped, tape_on_device, model_tape)
         self.optimizer.step(closure=closure)
-        self._post_step(taped)
+        if state_tapes_dct is None:
+            state_tapes_dct = self.states_tape_dct
+        if coef_tapes_dct is None:
+            coef_tapes_dct = self.coefs_tape_dct
+        self._post_step(taped, tape_on_device, state_tapes_dct, coef_tapes_dct)
+        self.cur_idx+=1
         return None
 
-    def _pre_step(self, taped):
+    def _pre_step(self, taped:bool, tape_on_device:bool, model_tape:List[Module]=None):
+        '''
+        by default tapes model copy, override for other behavior
+        '''
         from copy import deepcopy
         if taped:
             copymodel = deepcopy(self.model)
-            if not self.tape_on_device:
+            for pa in copymodel.parameters():
+                pa.grad = None
+            if not tape_on_device:
                 copymodel.to('cpu')
-            self.model_tape.append(copymodel)
+            model_tape.append(copymodel)
         else:
-            self.model_tape.append(None)
+            model_tape.append(None)
         return None
     
-    def _post_step(self, taped):
-        if self.state_tape_required and taped:
-            grouped_states_lst = self.copy_state(self.optimizer, not self.tape_on_device)
-            self.states_tape.append(grouped_states_lst)
-        else:
-            self.states_tape.append(None)
-        self.cur_idx += 1
+    def _post_step(self, 
+                   taped:bool, 
+                   tape_on_device:bool,
+                   state_tapes_dct:Dict[str,List[Tensor]]=None,
+                   coef_tapes_dct:Dict[str,list]=None):
+        '''
+        must override for model_specific behavior
+        '''
+        raise NotImplementedError
+        # if self.state_tape_required and taped:
+        #     grouped_states_lst = self.copy_state(self.optimizer, not self.tape_on_device)
+        #     self.states_tape.append(grouped_states_lst)
+        # else:
+        #     self.states_tape.append(None)
+        # self.cur_idx += 1
         return None
     
-    def zero_grad(self, set_to_none:bool=True):
-        self.optimizer.zero_grad(set_to_none)
+    def zero_grad(self, set_to_none:bool=True, params:List[Tensor] = None):
+        from torch import zeros_like, no_grad
+        if params is None:
+            self.optimizer.zero_grad(set_to_none)
+        else:
+            if set_to_none:
+                for param in params:
+                    param.grad = None
+            else:
+                with no_grad():
+                    for param in params:
+                        param.grad = zeros_like(param)
         return None
     
     @staticmethod
@@ -195,24 +352,22 @@ class DiffOptimizer():
     ### methods specific to DiffOptimizer
     def backward(self, 
                  loss:Tensor, 
+                 params:List[Tensor]=None,
                  retain_graph:bool=False, 
                  create_graph:bool=False, 
                  accum_grad:bool=False,
-                 update_grad:bool=True):
+                 update_grad:bool=True)->List[Tensor]:
         '''
         call this function before calling self.step().
         backward function, takes in loss:Tensor and updates the grads in param_groups
         '''
         from torch.autograd import grad
-        params:List[Tensor] = []
-        for group in self.optimizer.param_groups:
-            pas = group['params']
-            params.extend(pas)
+        if params is None:
+            params = self.attached_params
         grads = grad(outputs=loss,
                      inputs=params,
                      retain_graph=retain_graph,
                      create_graph=create_graph)
-        self._model_grads_after_backward = grads
         if update_grad:
             if accum_grad:
                 with torch.no_grad():
@@ -225,85 +380,82 @@ class DiffOptimizer():
                 with torch.no_grad():
                     for gr,pa in zip(grads, params):
                         pa.grad = gr
-        return None
+        return grads
     
-    def meta_backward(self, meta_loss:Tensor, weight:float=1., refresh_bp:bool=False):
-        '''
-        Call this function after the computation of meta loss.\\
-        If meta loss is computed in batches, call this function
-        multiple times specifying weight. The resulting gradient
-        will be a weighted sum.
-        '''
-        from torch import cat, no_grad
-        meta_loss = meta_loss.mul(weight)
-        self.backward(loss=meta_loss, 
-                      retain_graph=False, 
-                      create_graph=False,
-                      accum_grad=False,
-                      update_grad=False)
-        grads:List[Tensor] = self._model_grads_after_backward
-        grad_groups:List[List[Tensor]] = [grads[startend[0]:startend[1]] for startend in self._pa_groups_startend_lst]
-        with no_grad():
-            if refresh_bp:
-                self.dLdw_groups = [cat([grad_.flatten() for grad_ in grads_]) for grads_ in grad_groups]
-            else:
-                for grads_, dLdw in zip(grad_groups, self.dLdw_groups):
-                    dLdw.add_(cat([grad_.flatten() for grad_ in grads_]))
     
-    def roll_back(self):
+    
+    def roll_back(self, attpa2modpa_idxes:List[int]=None):
         """
-        roll back to last step.
-        Returns the backbone model at last step.
+        cur_idx -= 1,
+        returns cur_idx, model at last step, and its parameters attached to optimizer
         """
-        step_idx = self.cur_idx - 1
-        model = self.at_step(step_idx)
-        return model
-    
-    def at_step(self, step_idx:int, change_state:bool=False)->Module:
-        '''
-        Returns taped model, and attach the parameter groups of self.optimizer to it.\\
-        Note that this function does not change self.optimizer.states unless change_state
-        is True.
-        '''
-        if change_state:
-            raise NotImplementedError("haven't implemented changing optimizer.state to step_idx")
-        
-        model = self.model_tape[step_idx]
-        if not self.tape_on_device:
-            model.to(self.device)
+        self.cur_idx -= 1
+        step_idx = self.cur_idx
+        if self.tape_on_device:
+            model = self.taped_model_at_step(step_idx)
+            self.model = model
+        else:
+            model = self.taped_model_at_step(step_idx, True)
             self.model.to('cpu')
-        self.cur_idx = step_idx
-        self.model = model
+            self.model = model
+        params = list(model.parameters())
+        if attpa2modpa_idxes is None:
+            attpa2modpa_idxes = self.attpa2modpa_idxes
+        attached_params = [params[idx] for idx in attpa2modpa_idxes]
+        self.attached_params = attached_params
+        return step_idx, model, attached_params
+    
+    def taped_model_at_step(self, step_idx:int, resume_device:bool=False)->Module:
+        '''
+        Returns a taped model
+        '''
+        model = self.model_tape[step_idx]
         if model is None:
             raise AssertionError("step {} was not taped!".format(step_idx))
-        paidx_grpidx_map = self.paidx_grpidx_map
-        param_groups = self.optimizer.param_groups
-        for grpidxlst, param in zip(paidx_grpidx_map, model.parameters()):
-            if len(grpidxlst)!=0:
-                for grpidx in grpidxlst:
-                    param_groups[grpidx[0]]['params'][grpidx[1]] = param
+        if resume_device:
+            model.to(self.device)
         return model
 
     def backprop_step(self,
+                      grads:List[Tensor],
+                      attached_params:List[Tensor],
+                      group_startends:List[Tuple[int,int]],
                       meta_params:List[Tensor],
+                      update_bp_states:bool=True,
+                      state_vars:Dict[str,List[Tensor]]=None,
+                      group_coefs:Dict[str, List[Any]]=None,
                       accum_grad:bool=True,
-                      update_bp_states:bool=True):
+                      train_lr:bool=False):
         """
-        Take one step backward and compute the meta gradients for meta_params.\\
+        Compute the meta gradients for meta_params.\\
         If accum_grad, the meta gradients will be added to meta_params[:].grad;
         if not accum_grad, the meta gradients will replace meta_params[:].grad.\\
         The backbone model must have been roll_backed and forwarded and backwarded
-        with its param.grad ready before calling backprop_step.
+        before calling backprop_step.\\
+        If update_bp_states, state_vars and group_coefs must not be None.
         """
         from torch import no_grad
+        if state_vars is None:
+            state_vars = self.state_vars
+        if group_coefs is None:
+            group_coefs = self.group_coefs
         if update_bp_states:
             #print('memory before update state', torch.cuda.memory_allocated(0))
-            self.update_backprop_state()
+            self.update_backprop_state(train_lr=train_lr, 
+                                       params=attached_params, 
+                                       grads=grads,
+                                       group_startends=group_startends,
+                                       **state_vars, 
+                                       **group_coefs)
             #print('memory after update state', torch.cuda.memory_allocated(0))
-            meta_grads = self.backprop_meta_params(meta_params, True)
-            #print('memory after backprop metaparams', torch.cuda.memory_allocated(0))
-        else:
-            meta_grads = self.backprop_meta_params(meta_params)
+        meta_grads = self.backprop_meta_params(grads = grads,
+                                               meta_params = meta_params, 
+                                               dLdgrad_groups = state_vars['dLdgrad_groups'],
+                                               update_dLdw = True,
+                                               attached_params=attached_params,
+                                               group_startends=group_startends,
+                                               dLdw_groups = state_vars['dLdw_groups'])
+            
         with no_grad():
             if accum_grad:
                 for megr,mepa in zip(meta_grads, meta_params):
@@ -316,45 +468,52 @@ class DiffOptimizer():
                     mepa.grad = megr
         return meta_grads
 
-    def update_backprop_state(self):
+    def update_backprop_state(self, 
+                              params:List[Tensor],
+                              grads:List[Tensor],
+                              group_startends:List[Tuple[int,int]],
+                              train_lr:bool,
+                              **kwargs)->None:
         """
-        Optimizer-specific backprop update function, in-place modify all backprop states.\\
+        Optimizer-specific backprop update function, in-place modify all backprop state_vars.\\
+        The kwargs are keys and vals in state_vars and group_coefs. It must include dLdw_groups,
+        dLdgrad_groups, lr_groups. The rest of them depend on the specific optimizer.\\
         The dLdw_groups is only partially computed, it requires a further dLdgrad*dgraddw
         to be later computed and added to itself.\\
-        Must be precedented by backward.
+        Must be precedented by backward.\\
         """
         raise NotImplementedError
     
-    def backprop_meta_params(self, meta_params:List[Tensor], update_dLdw:bool=True):
+    def backprop_meta_params(self,
+                             grads:List[Tensor],
+                             meta_params:List[Tensor], 
+                             dLdgrad_groups:List[Tensor],
+                             update_dLdw:bool=True, 
+                             attached_params:List[Tensor]=None,
+                             group_startends:List[Tuple[int,int]]=None,
+                             dLdw_groups:List[Tensor]=None,
+                             ):
         """
         Compute meta gradients for params in meta_params.\\
         Must be precedented by update_backprop_state.\\
+        If update_dLdw, will in-place update dLdw_groups.
         """
-        from torch import no_grad
+        from torch import no_grad, cat
         from torch.autograd import grad
         params = []
-        opt = self.optimizer
-        flatten = self.flatten
-        dLdw_groups = self.dLdw_groups
         if update_dLdw:
-            pa_groups_startend_lst = self._pa_groups_startend_lst
-            #把meta_params加到params后面
-            for group in opt.param_groups:
-                pas = group['params']
-                params.extend(pas)
+            params.extend(attached_params)
         params.extend(meta_params)
-        grads = self._model_grads_after_backward
-        grads = flatten(grads)
-        dLdgrad = flatten(self.dLdgrad_groups)
+        grads = cat([ele.flatten() for ele in grads])
+        dLdgrad = cat([ele.flatten() for ele in dLdgrad_groups])
         meta_grads = grad(outputs=grads,
                           inputs=params,
                           grad_outputs=dLdgrad,)
-        self._tracked_grads = None
         with no_grad():
             if update_dLdw:
-                for dLdw, startend in zip(dLdw_groups, pa_groups_startend_lst):
-                    dLdw.add_(flatten(meta_grads[startend[0]:startend[1]]))
-                meta_grads = meta_grads[pa_groups_startend_lst[-1][1]:]
+                for dLdw, (start,end) in zip(dLdw_groups, group_startends):
+                    dLdw.add_(cat([ele.flatten() for ele in meta_grads[start:end]]))
+                meta_grads = meta_grads[group_startends[-1][-1]:]
         return meta_grads
 
     @staticmethod

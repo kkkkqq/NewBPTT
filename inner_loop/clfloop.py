@@ -28,8 +28,8 @@ class CLFInnerLoop(InnerLoop):
         self.external_module:BaseModule = get_module(**external_module_args)
         self.data_per_loop = data_per_loop
         self.external_batch_size = external_batch_size
-        self.real_loader = DataLoader(real_dataset.dst_train, external_batch_size, True, pin_memory=True, num_workers=4)
-        
+        self.real_loader = DataLoader(real_dataset.dst_train, external_batch_size, shuffle=True, pin_memory=True, num_workers=4, drop_last=True)
+        self.loader_iter = iter(self.real_loader)
 
     # def forward_function(self, step_idx:int, backbone:Module, batch_kwargs:dict):
     #     batch_out = self.batch_function(batch_idx=step_idx, batch_size=self.inner_batch_size, **batch_kwargs)
@@ -41,9 +41,24 @@ class CLFInnerLoop(InnerLoop):
         meta_loss_item = 0.
         device = self.device
         data_per_loop = self.data_per_loop
+        diff_opt = self.diff_opt
         forwardloss = self.external_module.forward_loss
-        metabackward = self.diff_opt.meta_backward
-        for images, targets in self.real_loader:
+        metabackward = diff_opt.meta_backward
+        dLdw_groups_ = diff_opt.state_vars['dLdw_groups']
+        params_ = diff_opt.attached_params
+        group_startends_ = diff_opt.group_startends
+        backward_handle_ = diff_opt.backward
+        real_loader = self.real_loader
+        if not real_loader.drop_last:
+            raise AssertionError("the dataloader must have drop_last=True, otherwise weight for each batch will be biased.")
+        loader_iter = self.loader_iter
+        while num_data < data_per_loop:
+            try:
+                images, targets = next(loader_iter)
+            except:
+                loader_iter = iter(real_loader)
+                self.loader_iter = loader_iter
+                images, targets = next(loader_iter)
             images = images.to(device)
             targets = targets.to(device)
             batch_size = targets.shape[0]
@@ -55,11 +70,14 @@ class CLFInnerLoop(InnerLoop):
             meta_out = forwardloss(backbone, images, targets)
             meta_loss = meta_out[0]
             weight = float(batch_size)/float(data_per_loop)
-            metabackward(meta_loss, weight)
+            metabackward(meta_loss=meta_loss, 
+                         weight=weight,
+                         dLdw_groups=dLdw_groups_,
+                         params=params_,
+                         group_startends=group_startends_,
+                         _backward_handle=backward_handle_)
             meta_loss_item += meta_loss.item()*weight
-            if num_data >= self.data_per_loop:
-                break
-        return meta_loss
+        return meta_loss_item
 
         
     

@@ -19,7 +19,7 @@ class InnerLoop():
         self.inner_model_args = inner_model_args
         self.inner_opt_args = inner_opt_args
         self.inner_batch_size = inner_batch_size
-        self._paidx_grpidx_map = None
+        self._attpa2modpa_idxes = None
         self.backbone = None
         self.diff_opt = None
 
@@ -44,8 +44,8 @@ class InnerLoop():
         backbone = get_model(**self.inner_model_args)
         backbone.to(self.device)
         opt = get_optimizer(backbone.parameters(), **self.inner_opt_args)
-        diffopt = get_diff_opt(backbone, opt, True, self._paidx_grpidx_map)
-        self._paidx_grpidx_map = diffopt.paidx_grpidx_map
+        diffopt = get_diff_opt(backbone, opt, True, self._attpa2modpa_idxes)
+        self._attpa2modpa_idxes = diffopt.attpa2modpa_idxes
         self.backbone = backbone
         self.diff_opt = diffopt
         diffopt.forward_loop(self.forward_function,

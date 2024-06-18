@@ -1,6 +1,6 @@
 exp_config:
   project: BPTT
-  exp_name: lbrclfdd-rat-200-60-10ipc
+  exp_name: lbr-rrccropfliprotate-clfdd-rat-200-60-10ipc
   seed: 0
   use_wandb: True
   wandb_api_key: 
@@ -23,8 +23,8 @@ synset_config:
     train_labeler: False
     init_type: 'noise_normal'
     augment_args:
-      strategy: 'flip_rotate'
-      batch: True
+      strategy: 'rrc_crop_flip_rotate'
+      batch: False
   synset_opt_args:
     images:
       opt_name: adam
@@ -78,10 +78,10 @@ loop_config:
         opt_name: adam
         lr: 0.001
       inner_batch_size: 100
-      data_per_loop: 5120
+      data_per_loop: 5000
       external_module_args:
         module_name: clfmodule
         module_args:
           aug_args:
-            strategy: 'flip_rotate'
-      external_batch_size: 1024
+            strategy: 'rrc_crop_flip_rotate'
+      external_batch_size: 2500

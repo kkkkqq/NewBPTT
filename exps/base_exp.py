@@ -226,6 +226,7 @@ class BaseExperiment():
         return None
         
     def run_exp(self):
+        from time import time
         self.init_wandb()
         #prepare variables used in the loop
         inner_loop = self.inner_loop
@@ -247,6 +248,7 @@ class BaseExperiment():
         #looping
         for it in range(self.num_steps+1):
             synset.shuffle()
+            tm = time()
             one_loop(inner_loop,
                     synset,
                     opts,
@@ -258,13 +260,15 @@ class BaseExperiment():
                     batch_kwargs,
                     meta_loss_kwargs
                     )
+            tm = time()-tm
+            print('one loop took {}s.'.format(tm))
             if (it+1)%eval_interval==0:
                 eval_synset(it, synset, use_wandb)
             upload_vis_ = upload_vis and (it+1)%upload_visualize_interval_==0
             save_vis_ = save_vis and (it+1)%save_visualize_interval_==0
             upload_visualize_save(it, synset, upload_vis_, save_vis_)
 
-                
+              
 
             
     

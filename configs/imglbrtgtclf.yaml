@@ -80,10 +80,10 @@ loop_config:
         opt_name: adam
         lr: 0.001
       inner_batch_size: 100
-      data_per_loop: 5120
+      data_per_loop: 5000
       external_module_args:
         module_name: clfmodule
         module_args:
           aug_args:
             strategy: 'flip_rotate'
-      external_batch_size: 1024
+      external_batch_size: 2500

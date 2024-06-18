@@ -1,6 +1,6 @@
 exp_config:
   project: BPTT
-  exp_name: clfdd-unbatched-fliprotate-rat-200-60-zca-10ipc
+  exp_name: clfdd-rat-200-60-zca-10ipc
   seed: 0
   use_wandb: True
   wandb_api_key: 
@@ -21,7 +21,7 @@ synset_config:
     init_type: 'noise_normal'
     augment_args:
       strategy: 'flip_rotate'
-      batch: False
+      batch: True
   synset_opt_args:
     images:
       opt_name: adam
@@ -60,12 +60,11 @@ eval_config:
   save_visualize_interval: 100
 
 loop_config:
-  bptt_type: rat_bptt
-  num_forward: 200
-  num_backward: 60
-  meta_loss_batchsize: 1024
+  bptt_type: bptt
+  num_forward: 100
+  num_backward: 100
   inner_loop_config:
-    inner_loop_type: clf
+    inner_loop_type: mtt
     inner_loop_args:
       inner_module_args:
         module_name: clfmodule
@@ -78,10 +77,14 @@ loop_config:
         opt_name: adam
         lr: 0.001
       inner_batch_size: 100
-      data_per_loop: 5000
-      external_module_args:
-        module_name: clfmodule
-        module_args:
-          aug_args:
-            strategy: 'flip_rotate'
-      external_batch_size: 2500
+      expert_model_args:
+        modelname: 'convnet3'
+      expert_opt_args:
+        opt_name: adam
+        lr: 0.001
+      buffer_folder: 'assets/buffers/convnet3zca_0to7_itv1'
+      num_exp: 100
+      max_start_epoch: 5
+      expert_epoch_per_step: 100
+      train_lr: True
+      lr_lr: 1e-7

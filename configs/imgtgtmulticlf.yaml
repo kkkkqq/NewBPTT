@@ -1,8 +1,8 @@
 exp_config:
   project: BPTT
-  exp_name: clfdd-unbatched-fliprotate-rat-200-60-zca-10ipc
+  exp_name: multiclfdd-unbatched-fliprotate-rat-200-60-zca-10ipc
   seed: 0
-  use_wandb: True
+  use_wandb: False
   wandb_api_key: 
   num_steps: 100000
   device: 'cuda'
@@ -25,10 +25,10 @@ synset_config:
   synset_opt_args:
     images:
       opt_name: adam
-      lr: 0.001
+      lr: 0.005
     targets:
       opt_name: adam
-      lr: 0.001
+      lr: 0.005
     ema_grad_clip: True
     ema_coef: 0.9
 
@@ -60,9 +60,9 @@ eval_config:
   save_visualize_interval: 100
 
 loop_config:
-  bptt_type: rat_bptt
+  bptt_type: bptt
   num_forward: 200
-  num_backward: 60
+  num_backward: 200
   meta_loss_batchsize: 1024
   inner_loop_config:
     inner_loop_type: clf
@@ -85,3 +85,5 @@ loop_config:
           aug_args:
             strategy: 'flip_rotate'
       external_batch_size: 2500
+      num_meta_loss: 5
+      min_steps: 60
