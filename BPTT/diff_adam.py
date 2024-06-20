@@ -45,7 +45,7 @@ class DiffAdam(DiffOptimizer):
                               maximize_groups:List[bool],
                               t_groups:List[Tensor]
                               ):
-        from torch import zeros_like, no_grad, cat, sqrt, tensor
+        from torch import zeros_like, no_grad, cat, sqrt, tensor, ones
         with no_grad():
             if len(dLdm_groups)==0:
                 for dLdw_ in dLdw_groups:
@@ -54,42 +54,47 @@ class DiffAdam(DiffOptimizer):
             # for idx, group in enumerate(param_groups):
             dLdgrad_groups.clear()
             groups = zip(group_startends,
-                      dLdw_groups, 
-                      dLdm_groups, 
-                      dLdv_groups, 
-                      t_groups,
-                      m_groups, 
-                      v_groups,
-                      lr_groups,
-                      beta1_groups,
-                      beta2_groups,
-                      eps_groups,
-                      weight_decay_groups,
-                      maximize_groups,
+                         grads,
+                         dLdw_groups, 
+                         dLdm_groups, 
+                         dLdv_groups, 
+                         t_groups,
+                         m_groups, 
+                         v_groups,
+                         lr_groups,
+                         beta1_groups,
+                         beta2_groups,
+                         eps_groups,
+                         weight_decay_groups,
+                         maximize_groups,
                       )
-            for (start,end), dLdw, dLdm, dLdv, t, m, v, lr, beta1, beta2, eps, weight_decay, maximize in groups:
+            for (start,end), grad, dLdw, dLdm, dLdv, t, m, v, lr, beta1, beta2, eps, weight_decay, maximize in groups:
                 if m.device != dLdw.device:
                     device_ = dLdw.device
                     m = m.to(device_)
                     v = v.to(device_)
-                gt = cat([ele.detach().flatten() for ele in grads[start:end]])
+                gt = grad.detach().clone()
                 beta1, beta2 = tensor(beta1), tensor(beta2)
                 omb1 = 1.-beta1
                 omb1t = 1.- beta1.pow(t)
+                #omb1t = 1. - beta1**t
                 omb2 = 1.-beta2
                 omb2t = 1. - beta2.pow(t)
+                # omb2t = 1. - beta2**t
                 rtvdomb2t = sqrt(v.div(omb2t))
+                rtvdomb2taddeps = rtvdomb2t.add(eps)
                 if train_lr:
-                    a = m.div(omb1t).div(rtvdomb2t.add(eps))
+                    a = m.div(rtvdomb2taddeps).div(omb1t)
                     self.lr_grad.add_(dLdw.dot(a).mul(-1))
                 if maximize:
                     gt.mul_(-1.)
                 if weight_decay!=0:
                     w = cat([ele.flatten() for ele in params[start:end]])
                     gt.add_(w.mul(weight_decay))
-                dLdm.mul_(beta1).sub_(dLdw.mul(lr).div(omb1t).div(rtvdomb2t.add(eps)))
-                dLdv.mul_(beta2).add_(dLdw.mul(lr).mul(m).div(omb1t).div(omb2t).div(2).div(rtvdomb2t).div(rtvdomb2t.add(eps).pow(2)))
-                gt.mul_(2.*omb2).mul_(dLdv).add_(dLdm.mul(omb1))
+                dLdm.mul_(beta1).sub_(dLdw.mul(lr).div(omb1t).div(rtvdomb2taddeps))
+                dLdv.mul_(beta2).add_(dLdw.mul(lr).mul(m).div(omb1t).div(omb2t).div(2).div(rtvdomb2t).div(rtvdomb2taddeps.pow(2)))
+                # dLdv.mul_(beta2).add_(ones(1, device=device_).div(omb1t).div(omb2t).div(2).mul(lr).mul(dLdw).mul(m).div(rtvdomb2t).div(rtvdomb2taddeps.pow(2)))
+                gt.mul_(2).mul_(omb2).mul_(dLdv).add_(dLdm.mul(omb1))
                 if weight_decay!=0:
                     dLdw.add_(gt.mul(weight_decay))
                 if maximize:

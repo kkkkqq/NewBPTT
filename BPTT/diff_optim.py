@@ -38,8 +38,9 @@ class DiffOptimizer():
         self.state_vars:Dict[str,List[Tensor]] = {'dLdw_groups':[], 'dLdgrad_groups':[]}
         self.group_coefs:Dict[str,list] = {'lr_groups':[]}
         self.cur_idx:int = 0
-        self._forward_function:Callable = None
-        self._forward_kwargs:dict = None
+        self.forward_function:Callable = None
+        self.forward_args_lst = None
+        self.forward_kwargs_lst = None
         self.lr_grad:float = None
 
     @staticmethod
@@ -77,16 +78,21 @@ class DiffOptimizer():
                      forward_function:Callable, 
                      num_steps:int,
                      num_taped:int=None,
-                     forward_kwargs:dict=dict()):
+                     forward_args_lst:List[list]=None,
+                     forward_kwargs_lst:List[dict]=None,
+                     ):
         """
         wrapper function for the inner forward loop.\\
-        `forward_function`:a function that takes in `step_idx` and `backbone` and returns `loss`.\\
+        `forward_function`: its first positional arg must be the model.\\
         `num_steps`: number for inner forward steps to perform.\\
         `num_taped`: number of taped steps at the end. \\
         `forward_kwargs`: kwargs that will be passed into forward_function apart from `step_idx` and `backbone`.
         """
-        self._forward_function = forward_function
-        self._forward_kwargs = forward_kwargs
+        
+        self.forward_function = forward_function
+        self.forward_args_lst = forward_args_lst
+        self.forward_kwargs_lst = forward_kwargs_lst
+        forwardloss = args_and_kwargs(forward_function, forward_args_lst, forward_kwargs_lst)
         tape_on_device = self.tape_on_device
         zero_grad = self.zero_grad
         backward = self.backward
@@ -95,11 +101,12 @@ class DiffOptimizer():
         state_tapes_dct = self.states_tape_dct
         coef_tapes_dct = self.coefs_tape_dct
         model_tape = self.model_tape
+        model = self.model
         for idx_ in range(num_steps):
             zero_grad()
             step_idx = self.cur_idx
-            loss = forward_function(step_idx=step_idx, backbone=self.model, **forward_kwargs)
-            backward(loss, params, False, False, False, True)
+            loss = forwardloss(model, idx_)
+            backward(loss, params, True, True, False, False)
             taped = idx_ >= num_steps-num_taped or num_taped is None
             step(taped, None, tape_on_device, model_tape, state_tapes_dct, coef_tapes_dct)
         print('{} inner forward steps'.format(num_steps))
@@ -158,7 +165,10 @@ class DiffOptimizer():
     def backward_loop(self, 
                       num_steps:int, 
                       meta_params:List[Tensor],
-                      trainable_lr:bool=False):
+                      trainable_lr:bool=False,
+                      forward_function:Callable=None,
+                      forward_args_lst:List[list]=None,
+                      forward_kwargs_lst:List[dict]=None):
         '''
         Wrapper function for backward inner loop.\\
         It computes the meta grads on meta_params for each step and accumulates
@@ -167,8 +177,13 @@ class DiffOptimizer():
         roll_back = self.roll_back
         zero_grad = self.zero_grad
         backward = self.backward
-        forward_function = self._forward_function
-        forward_kwargs = self._forward_kwargs
+        if forward_function is None:
+            forward_function = self.forward_function
+        if forward_args_lst is None:
+            forward_args_lst = self.forward_args_lst
+        if forward_kwargs_lst is None:
+            forward_kwargs_lst = self.forward_kwargs_lst
+        forwardloss = args_and_kwargs(forward_function, forward_args_lst, forward_kwargs_lst)
         backprop_step = self.backprop_step
         state_vars = self.state_vars
         coefs_tape_dct = self.coefs_tape_dct
@@ -182,7 +197,7 @@ class DiffOptimizer():
             for state_key, state_tape in state_tapes:
                 state_vars[state_key] = state_tape[cur_idx]
             zero_grad(True, attached_params)
-            loss = forward_function(step_idx=cur_idx, backbone=model, **forward_kwargs)
+            loss = forwardloss(model, cur_idx)
             grads = backward(loss=loss, 
                             params=attached_params, 
                             create_graph=True, 
@@ -353,34 +368,30 @@ class DiffOptimizer():
     def backward(self, 
                  loss:Tensor, 
                  params:List[Tensor]=None,
+                 update_grad:bool=True,
+                 accum_grad:bool=False,
                  retain_graph:bool=False, 
                  create_graph:bool=False, 
-                 accum_grad:bool=False,
-                 update_grad:bool=True)->List[Tensor]:
+                 )->List[Tensor]:
         '''
         call this function before calling self.step().
         backward function, takes in loss:Tensor and updates the grads in param_groups
         '''
-        from torch.autograd import grad
+        from torch.autograd import grad, backward as torchbackward
         if params is None:
             params = self.attached_params
-        grads = grad(outputs=loss,
-                     inputs=params,
-                     retain_graph=retain_graph,
-                     create_graph=create_graph)
         if update_grad:
-            if accum_grad:
-                with torch.no_grad():
-                    for gr,pa in zip(grads, params):
-                        if pa.grad is None:
-                            pa.grad = gr
-                        else:
-                            pa.grad += gr
-            else:
-                with torch.no_grad():
-                    for gr,pa in zip(grads, params):
-                        pa.grad = gr
-        return grads
+            if not accum_grad:
+                for pa in params:
+                    pa.grad = None
+            torchbackward(loss, inputs=params, retain_graph=retain_graph, create_graph=create_graph)
+            return None
+        else:
+            grads = grad(outputs=loss,
+                        inputs=params,
+                        retain_graph=retain_graph,
+                        create_graph=create_graph)
+            return grads
     
     
     
@@ -434,13 +445,14 @@ class DiffOptimizer():
         before calling backprop_step.\\
         If update_bp_states, state_vars and group_coefs must not be None.
         """
-        from torch import no_grad
+        from torch import no_grad, cat
         if state_vars is None:
             state_vars = self.state_vars
         if group_coefs is None:
             group_coefs = self.group_coefs
         if update_bp_states:
             #print('memory before update state', torch.cuda.memory_allocated(0))
+            grads = [cat([ele.flatten() for ele in grads[start:end]]) for start,end in group_startends]
             self.update_backprop_state(train_lr=train_lr, 
                                        params=attached_params, 
                                        grads=grads,
@@ -523,7 +535,19 @@ class DiffOptimizer():
 
         
 
-        
+def args_and_kwargs(function_handle, args_lst, kwargs_lst):
+    none_args = args_lst is None
+    none_kwargs = kwargs_lst is None
+    
+    if none_args and none_kwargs:
+        forwardloss = lambda backbone, idx: function_handle(backbone)
+    elif none_args and not none_kwargs:
+        forwardloss = lambda backbone, idx: function_handle(backbone, **kwargs_lst[idx])
+    elif not none_args and none_kwargs:
+        forwardloss = lambda backbone, idx: function_handle(backbone, *args_lst[idx])
+    else:
+        forwardloss = lambda backbone, idx: function_handle(backbone, *args_lst[idx], **kwargs_lst[idx])
+    return forwardloss
 
 
 

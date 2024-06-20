@@ -111,12 +111,13 @@ class MultiCLFInnerLoop(InnerLoop):
         
         num_meta_loss = self.num_meta_loss
         stones = [max(self.min_steps, num_forward-num_backward)]
+        #stones = [num_forward - num_backward]
         if num_meta_loss > 1:
             stones.extend(self.cand_steps(self.min_steps, 
                                         num_forward, 
                                         num_backward, 
                                         num_meta_loss))
-        
+        print('stones: ', stones)
         
 
         backbone = get_model(**self.inner_model_args)
@@ -126,20 +127,33 @@ class MultiCLFInnerLoop(InnerLoop):
         self._attpa2modpa_idxes = diffopt.attpa2modpa_idxes
         self.backbone = backbone
         self.diff_opt = diffopt
+
+        forward_args_lst = None
+        forward_kwargs_lst = [{'step_idx':idx} for idx in range(num_forward)]
+        for dct in forward_kwargs_lst:
+            dct.update(batch_kwargs)
+
         diffopt.forward_loop(self.forward_function,
                              stones[-1],
-                             num_backward,
-                             batch_kwargs)
+                             min(num_backward, num_forward-self.min_steps),
+                             forward_args_lst,
+                             forward_kwargs_lst,
+                             )
         stored_data = None
         divide_by = num_meta_loss
         for idx in range(len(stones)-1, 0, -1):
-            print('stone: {}, cur_idx: {}'.format(stones[idx], diffopt.cur_idx))
+            #print('stone: {}, cur_idx: {}'.format(stones[idx], diffopt.cur_idx))
             backbone = diffopt.model
             meta_loss_item, stored_data = self.meta_loss_and_backward(backbone=backbone, 
                                                                       stored_data=stored_data, 
                                                                       divide_by=divide_by,
                                                                       **meta_loss_kwargs)
-            diffopt.backward_loop(stones[idx]-stones[idx-1], meta_params)
+            num_loop = stones[idx]-stones[idx-1]
+            #print('number of bacward loops: ', num_loop)
+            if num_loop == 0:
+                break
+            
+            diffopt.backward_loop(num_loop, meta_params)
         return meta_loss_item
         
     

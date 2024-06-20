@@ -23,7 +23,7 @@ class InnerLoop():
         self.backbone = None
         self.diff_opt = None
 
-    def forward_function(self, step_idx:int, backbone:Module, **batch_kwargs):
+    def forward_function(self, backbone:Module, step_idx:int,  **batch_kwargs):
         batch_out = self.batch_function(batch_idx=step_idx, batch_size=self.inner_batch_size, **batch_kwargs)
         forward_loss_out = self.inner_module.forward_loss(backbone, *batch_out)
         return forward_loss_out[0]
@@ -48,10 +48,16 @@ class InnerLoop():
         self._attpa2modpa_idxes = diffopt.attpa2modpa_idxes
         self.backbone = backbone
         self.diff_opt = diffopt
+        forward_args_lst = None
+        forward_kwargs_lst = [{'step_idx':idx} for idx in range(num_forward)]
+        for dct in forward_kwargs_lst:
+            dct.update(batch_kwargs)
+
         diffopt.forward_loop(self.forward_function,
                              num_forward,
                              num_backward,
-                             batch_kwargs)
+                             forward_args_lst,
+                             forward_kwargs_lst)
         meta_loss_item = self.meta_loss_and_backward(backbone=backbone, **meta_loss_kwargs)
         diffopt.backward_loop(num_backward, meta_params)
         return meta_loss_item
