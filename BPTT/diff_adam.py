@@ -134,7 +134,7 @@ class DiffAdam(DiffOptimizer):
                 m,v,t = mvt_lst(state, pas)
                 m = flatten(m)
                 v = flatten(v)
-                t = t[0]
+                t = t[0].detach().clone()
                 if not tape_on_device:
                     m = m.to('cpu')
                     v = v.to('cpu')

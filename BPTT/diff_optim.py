@@ -450,16 +450,16 @@ class DiffOptimizer():
             group_coefs = self.group_coefs
         if update_bp_states:
             #print('memory before update state', torch.cuda.memory_allocated(0))
-            grads = [flatten(grads[start:end]) for start,end in group_startends]
+            flat_grads = [flatten(grads[start:end]) for start,end in group_startends]
             self.update_backprop_state(train_lr=train_lr, 
                                        params=attached_params, 
-                                       grads=grads,
+                                       grads=flat_grads,
                                        group_startends=group_startends,
                                        tape_on_device=self.tape_on_device,
                                        **state_vars, 
                                        **group_coefs)
             #print('memory after update state', torch.cuda.memory_allocated(0))
-        meta_grads = self.backprop_meta_params(grads = grads,
+        meta_grads = self.backprop_meta_params(grads = flat_grads,
                                                meta_params = meta_params, 
                                                dLdgrad_groups = state_vars['dLdgrad_groups'],
                                                update_dLdw = True,
