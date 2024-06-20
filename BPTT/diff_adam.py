@@ -43,9 +43,11 @@ class DiffAdam(DiffOptimizer):
                               eps_groups:List[float],
                               weight_decay_groups:List[float],
                               maximize_groups:List[bool],
-                              t_groups:List[Tensor]
+                              t_groups:List[Tensor],
+                              tape_on_device:bool
                               ):
-        from torch import zeros_like, no_grad, cat, sqrt, tensor, ones
+        from torch import zeros_like, no_grad, cat, sqrt, tensor, ones, as_tensor
+        from BPTT.jits import flatten_detached, adam_bpstate
         with no_grad():
             if len(dLdm_groups)==0:
                 for dLdw_ in dLdw_groups:
@@ -53,7 +55,14 @@ class DiffAdam(DiffOptimizer):
                     dLdv_groups.append(zeros_like(dLdw_))
             # for idx, group in enumerate(param_groups):
             dLdgrad_groups.clear()
-            groups = zip(group_startends,
+            # if weight decay, prepare w for later use
+            w_groups = []
+            for wd, (start,end) in zip(weight_decay_groups, group_startends):
+                if wd!=0:
+                    w_groups.append(flatten_detached(params[start:end]))
+                else:
+                    w_groups.appen(None)
+            groups = zip(w_groups,
                          grads,
                          dLdw_groups, 
                          dLdm_groups, 
@@ -68,40 +77,30 @@ class DiffAdam(DiffOptimizer):
                          weight_decay_groups,
                          maximize_groups,
                       )
-            for (start,end), grad, dLdw, dLdm, dLdv, t, m, v, lr, beta1, beta2, eps, weight_decay, maximize in groups:
-                if m.device != dLdw.device:
+            for w, grad, dLdw, dLdm, dLdv, t, m, v, lr, beta1, beta2, eps, weight_decay, maximize in groups:
+                if not tape_on_device:
                     device_ = dLdw.device
                     m = m.to(device_)
                     v = v.to(device_)
                 gt = grad.detach().clone()
-                beta1, beta2 = tensor(beta1), tensor(beta2)
-                omb1 = 1.-beta1
-                omb1t = 1.- beta1.pow(t)
-                #omb1t = 1. - beta1**t
-                omb2 = 1.-beta2
-                omb2t = 1. - beta2.pow(t)
-                # omb2t = 1. - beta2**t
-                rtvdomb2t = sqrt(v.div(omb2t))
-                rtvdomb2taddeps = rtvdomb2t.add(eps)
-                if train_lr:
-                    a = m.div(rtvdomb2taddeps).div(omb1t)
-                    self.lr_grad.add_(dLdw.dot(a).mul(-1))
-                if maximize:
-                    gt.mul_(-1.)
-                if weight_decay!=0:
-                    w = cat([ele.flatten() for ele in params[start:end]])
-                    gt.add_(w.mul(weight_decay))
-                dLdm.mul_(beta1).sub_(dLdw.mul(lr).div(omb1t).div(rtvdomb2taddeps))
-                dLdv.mul_(beta2).add_(dLdw.mul(lr).mul(m).div(omb1t).div(omb2t).div(2).div(rtvdomb2t).div(rtvdomb2taddeps.pow(2)))
-                # dLdv.mul_(beta2).add_(ones(1, device=device_).div(omb1t).div(omb2t).div(2).mul(lr).mul(dLdw).mul(m).div(rtvdomb2t).div(rtvdomb2taddeps.pow(2)))
-                gt.mul_(2).mul_(omb2).mul_(dLdv).add_(dLdm.mul(omb1))
-                if weight_decay!=0:
-                    dLdw.add_(gt.mul(weight_decay))
-                if maximize:
-                    gt.mul_(-1.)
-                dLdgrad_groups.append(gt)
-                # print('max dLdw', torch.max(torch.abs(dLdw)).item())
-                # print('max dLdgt', torch.max(torch.abs(gt)).item())
+                beta1, beta2 = as_tensor(beta1), as_tensor(beta2)
+                dLdgrad, lr_grad = adam_bpstate(train_lr,
+                                                m,
+                                                v,
+                                                t,
+                                                gt,
+                                                w,
+                                                dLdw,
+                                                dLdm,
+                                                dLdv,
+                                                lr,
+                                                beta1,
+                                                beta2,
+                                                eps,
+                                                weight_decay,
+                                                maximize)
+                self.lr_grad.add_(lr_grad)
+                dLdgrad_groups.append(dLdgrad)
         return None
     
     def _pre_step(self,
@@ -121,30 +120,24 @@ class DiffAdam(DiffOptimizer):
                    state_tapes_dct,
                    coef_tapes_dct):
         from torch import cat
+        from BPTT.jits import flatten
         if taped:
             state = self.opt_state
             param_groups = self.opt_param_groups
             groups_tup = [[] for _ in range(9)]
             state_keys = ['m_groups', 'v_groups', 't_groups']
             coef_keys = ['lr_groups', 'beta1_groups', 'beta2_groups', 'eps_groups', 'maximize_groups', 'weight_decay_groups']
+
             for group in param_groups:
+                #首先是抽取每个pa对应的states并分别组成lst
                 pas = group['params']
-                m_lst = []
-                v_lst = []
-                t_lst = []
-                for pa in pas:
-                    dct = state[pa]
-                    m_lst.append(dct['exp_avg'].flatten())
-                    v_lst.append(dct['exp_avg_sq'].flatten())
-                    t_lst.append(dct['step'].item())
-                    
-                m = cat(m_lst, dim=0)
-                v = cat(v_lst, dim=0)
-                t_set = set(t_lst)
-                if len(t_set)>1:
-                    raise AssertionError("'step' in optimizer differ for each params in the param group!")
+                m,v,t = mvt_lst(state, pas)
+                m = flatten(m)
+                v = flatten(v)
+                if len(set(t))==0:
+                    t = t[0]
                 else:
-                    t = t_set.pop()
+                    raise AssertionError('`step` in the same group differ!')
                 if not tape_on_device:
                     m = m.to('cpu')
                     v = v.to('cpu')
@@ -174,5 +167,25 @@ class DiffAdam(DiffOptimizer):
 
 
                 
+def mvt_lst(state, pas):
+    mvt_lst_ = []
+    for pa in pas:
+        dct = state[pa]
+        mvt_lst_.append(dct['exp_avg'], dct['exp_avg_sq'], dct['step'])
+    return  zip(*mvt_lst_)
+    
 
-
+def m_v_t(state, pas):
+    from torch import cat
+    m_lst = []
+    v_lst = []
+    dct = dict()
+    for pa in pas:
+        dct = state[pa]
+        m_lst.append(dct['exp_avg'].detach().flatten())
+        v_lst.append(dct['exp_avg_sq'].detach().flatten())
+        
+    m:Tensor = cat(m_lst, dim=0)
+    v:Tensor = cat(v_lst, dim=0)
+    t:Tensor = dct['step']
+    return m, v, t

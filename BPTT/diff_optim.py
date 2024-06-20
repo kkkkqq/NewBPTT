@@ -41,7 +41,7 @@ class DiffOptimizer():
         self.forward_function:Callable = None
         self.forward_args_lst = None
         self.forward_kwargs_lst = None
-        self.lr_grad:float = None
+        self.lr_grad:Tensor = torch.zeros(1, device=self.device)
 
     @staticmethod
     def unroll_param_groups(param_groups:dict):
@@ -130,6 +130,7 @@ class DiffOptimizer():
         otherwise it in-place modifies dLdw_groups and returns it. 
         '''
         from torch import cat, no_grad
+        from BPTT.jits import flatten
         meta_loss = meta_loss.mul(weight)
         if _backward_handle is None:
             self_backward = self.backward
@@ -147,12 +148,13 @@ class DiffOptimizer():
         with no_grad():
             if dLdw_groups is None:
                 dLdw_groups = self.state_vars['dLdw_groups']
-            if len(dLdw_groups)!=0:
+            if len(dLdw_groups)==len(grad_groups):
                 for grads_, dLdw in zip(grad_groups, dLdw_groups):
-                    dLdw.add_(cat([grad_.flatten() for grad_ in grads_]))
+                    dLdw.add_(flatten(grads_))
             else:
+                dLdw_groups.clear()
                 for grads_ in grad_groups:
-                    dLdw_groups.append(cat([grad_.flatten() for grad_ in grads_]))
+                    dLdw_groups.append(flatten(grads))
         if _delete_optimizer:
             self.optimizer = None
             self.opt_state = None
@@ -348,19 +350,14 @@ class DiffOptimizer():
                 pas = pa_group['params']
                 pas_states_lst = []
                 for pa in pas:
-                    sts = deepcopy(state[pa])
-                    for k,v in sts.items():
-                        if isinstance(v, Tensor):
-                            sts[k] = v.to('cpu')
-                    pas_states_lst.append(sts)
+                    pas_states_lst.append({key:val.detach().clone().cpu() if isinstance(val, Tensor) else deepcopy(val) for key, val in state[pa].items()})
                 grouped_states_lst.append(pas_states_lst)
         else:
             for pa_group in param_groups:
                 pas = pa_group['params']
                 pas_states_lst = []
                 for pa in pas:
-                    sts = deepcopy(state[pa])
-                    pas_states_lst.append(sts)
+                    pas_states_lst.append({key:val.detach().clone() if isinstance(val, Tensor) else deepcopy(val) for key, val in state[pa].items()})
                 grouped_states_lst.append(pas_states_lst)
         return grouped_states_lst
     
@@ -445,14 +442,15 @@ class DiffOptimizer():
         before calling backprop_step.\\
         If update_bp_states, state_vars and group_coefs must not be None.
         """
-        from torch import no_grad, cat
+        from torch import no_grad
+        from BPTT.jits import flatten
         if state_vars is None:
             state_vars = self.state_vars
         if group_coefs is None:
             group_coefs = self.group_coefs
         if update_bp_states:
             #print('memory before update state', torch.cuda.memory_allocated(0))
-            grads = [cat([ele.flatten() for ele in grads[start:end]]) for start,end in group_startends]
+            grads = [flatten(grads[start:end]) for start,end in group_startends]
             self.update_backprop_state(train_lr=train_lr, 
                                        params=attached_params, 
                                        grads=grads,
@@ -512,26 +510,23 @@ class DiffOptimizer():
         """
         from torch import no_grad, cat
         from torch.autograd import grad
+        from BPTT.jits import flatten
         params = []
         if update_dLdw:
             params.extend(attached_params)
         params.extend(meta_params)
-        grads = cat([ele.flatten() for ele in grads])
-        dLdgrad = cat([ele.flatten() for ele in dLdgrad_groups])
+        grads = flatten(grads)
+        dLdgrad = flatten(dLdgrad_groups)
         meta_grads = grad(outputs=grads,
                           inputs=params,
                           grad_outputs=dLdgrad,)
         with no_grad():
             if update_dLdw:
                 for dLdw, (start,end) in zip(dLdw_groups, group_startends):
-                    dLdw.add_(cat([ele.flatten() for ele in meta_grads[start:end]]))
+                    dLdw.add_(flatten(meta_grads[start:end]))
                 meta_grads = meta_grads[group_startends[-1][-1]:]
         return meta_grads
 
-    @staticmethod
-    def flatten(tsr_lst:List[Tensor]):
-        from torch import cat
-        return cat([tsr.flatten() for tsr in tsr_lst])
 
         
 
