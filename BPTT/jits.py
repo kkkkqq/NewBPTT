@@ -36,7 +36,7 @@ def adam_bpstate(train_lr:bool,
     rtvdomb2taddeps = rtvdomb2t.add(eps)
     lr_grad = torch.zeros(1, device=dLdm.device)
     if train_lr:
-        lr_grad.add(dLdw.dot(m.div(rtvdomb2taddeps).div(omb1t)).mul(-1))
+        lr_grad.add_(dLdw.dot(m.div(rtvdomb2taddeps).div(omb1t)).mul(-1))
     if maximize:
         gt.mul_(-1)
     if weight_decay != 0:

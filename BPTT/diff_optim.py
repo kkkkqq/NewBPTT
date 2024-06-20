@@ -148,13 +148,13 @@ class DiffOptimizer():
         with no_grad():
             if dLdw_groups is None:
                 dLdw_groups = self.state_vars['dLdw_groups']
-            if len(dLdw_groups)==len(grad_groups):
+            if len(dLdw_groups)!=0:
                 for grads_, dLdw in zip(grad_groups, dLdw_groups):
                     dLdw.add_(flatten(grads_))
             else:
                 dLdw_groups.clear()
                 for grads_ in grad_groups:
-                    dLdw_groups.append(flatten(grads))
+                    dLdw_groups.append(flatten(grads_))
         if _delete_optimizer:
             self.optimizer = None
             self.opt_state = None
