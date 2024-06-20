@@ -455,6 +455,7 @@ class DiffOptimizer():
                                        params=attached_params, 
                                        grads=grads,
                                        group_startends=group_startends,
+                                       tape_on_device=self.tape_on_device,
                                        **state_vars, 
                                        **group_coefs)
             #print('memory after update state', torch.cuda.memory_allocated(0))
@@ -483,6 +484,7 @@ class DiffOptimizer():
                               grads:List[Tensor],
                               group_startends:List[Tuple[int,int]],
                               train_lr:bool,
+                              tape_on_device:bool,
                               **kwargs)->None:
         """
         Optimizer-specific backprop update function, in-place modify all backprop state_vars.\\

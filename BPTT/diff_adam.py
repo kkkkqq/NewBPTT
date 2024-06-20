@@ -46,7 +46,7 @@ class DiffAdam(DiffOptimizer):
                               t_groups:List[Tensor],
                               tape_on_device:bool
                               ):
-        from torch import zeros_like, no_grad, cat, sqrt, tensor, ones, as_tensor
+        from torch import zeros_like, no_grad, cat, sqrt, tensor, ones, as_tensor, zeros
         from BPTT.jits import flatten_detached, adam_bpstate
         with no_grad():
             if len(dLdm_groups)==0:
@@ -61,7 +61,7 @@ class DiffAdam(DiffOptimizer):
                 if wd!=0:
                     w_groups.append(flatten_detached(params[start:end]))
                 else:
-                    w_groups.appen(None)
+                    w_groups.append(zeros(1))
             groups = zip(w_groups,
                          grads,
                          dLdw_groups, 
@@ -134,10 +134,7 @@ class DiffAdam(DiffOptimizer):
                 m,v,t = mvt_lst(state, pas)
                 m = flatten(m)
                 v = flatten(v)
-                if len(set(t))==0:
-                    t = t[0]
-                else:
-                    raise AssertionError('`step` in the same group differ!')
+                t = t[0]
                 if not tape_on_device:
                     m = m.to('cpu')
                     v = v.to('cpu')
@@ -171,7 +168,7 @@ def mvt_lst(state, pas):
     mvt_lst_ = []
     for pa in pas:
         dct = state[pa]
-        mvt_lst_.append(dct['exp_avg'], dct['exp_avg_sq'], dct['step'])
+        mvt_lst_.append((dct['exp_avg'], dct['exp_avg_sq'], dct['step']))
     return  zip(*mvt_lst_)
     
 

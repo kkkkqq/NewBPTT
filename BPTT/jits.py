@@ -17,7 +17,7 @@ def adam_bpstate(train_lr:bool,
                  v:Tensor,
                  t:Tensor,
                  gt:Tensor,
-                 w:Optional[Tensor],
+                 w:Tensor,
                  dLdw:Tensor,
                  dLdm:Tensor,
                  dLdv:Tensor,
@@ -34,7 +34,7 @@ def adam_bpstate(train_lr:bool,
     omb2t = 1. - beta2.pow(t)
     rtvdomb2t = v.div(omb2t).pow(0.5)
     rtvdomb2taddeps = rtvdomb2t.add(eps)
-    lr_grad = torch.zeros(1)
+    lr_grad = torch.zeros(1, device=dLdm.device)
     if train_lr:
         lr_grad.add(dLdw.dot(m.div(rtvdomb2taddeps).div(omb1t)).mul(-1))
     if maximize:
