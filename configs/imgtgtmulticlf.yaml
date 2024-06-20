@@ -1,8 +1,8 @@
 exp_config:
   project: BPTT
-  exp_name: multiclfdd-unbatchedfliprotate-8stage-200-60-zca-10ipc-lr0.005
+  exp_name: multiclfdd-unbatchedfliprotate-5stage-200-60-zca-10ipc-lr0.005
   seed: 0
-  use_wandb: True
+  use_wandb: False
   wandb_api_key: 
   num_steps: 100000
   device: 'cuda'
@@ -85,5 +85,5 @@ loop_config:
           aug_args:
             strategy: 'flip_rotate'
       external_batch_size: 2500
-      num_meta_loss: 8
+      num_meta_loss: 5
       min_steps: 60

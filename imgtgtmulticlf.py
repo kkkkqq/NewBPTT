@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES']='5'
+os.environ['CUDA_VISIBLE_DEVICES']='6'
 from exps.imgtgtmulticlf_exp import ImgTgtMltClfExp
 import yaml
 import argparse
